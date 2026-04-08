@@ -83,7 +83,25 @@
   }
 </script>
 
-<body class="h-full bg-slate-900 text-slate-100 font-sans antialiased">
+<body class="h-full bg-slate-900 text-slate-100 font-sans antialiased" x-cloak>
+<script>
+// Auth gate — redirect to login BEFORE Alpine renders anything.
+// Prevents flash of authenticated content for unauthenticated users.
+// Skips auth pages and dev bypass token requests.
+(function() {
+  var path = window.location.pathname;
+  if (path === '/login' || path === '/change-password' || path === '/setup-2fa') return;
+  // Allow dev bypass token via query param (headless Chrome / Claude Code)
+  if (window.location.search.indexOf('_dev_token=') !== -1) return;
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/api/v1/auth/me', false);
+  xhr.send();
+  if (xhr.status === 401) {
+    window.location.href = '/login';
+    throw new Error('redirect');
+  }
+})();
+</script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════
      App Cache (stale-while-revalidate, sessionStorage-backed)

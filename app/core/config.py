@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     # Cloudflare Access tunnel URL (shown on login page as SSO link)
     cf_tunnel_url: str = ""
 
+    # Dev bypass token — allows headless Chrome / Claude Code to access the app
+    # without authenticating. Set to a random string in dev, leave empty to disable.
+    # NEVER set this in production.
+    dev_bypass_token: str = ""
+
     @model_validator(mode="after")
     def _auto_generate_jwt_secret(self) -> "Settings":
         """Generate and persist a JWT secret key when the placeholder is detected.

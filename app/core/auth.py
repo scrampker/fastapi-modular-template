@@ -77,7 +77,18 @@ async def get_current_user(request: Request) -> UserContext | None:
     if api_key:
         return await _resolve_api_key_user(registry, api_key)
 
-    # ── 6. No credentials ────────────────────────────────────────────
+    # ── 6. Dev bypass token (headless Chrome / Claude Code access) ───
+    # Enabled via DEV_BYPASS_TOKEN env var. NEVER set in production.
+    # Accepts: ?_dev_token=<token> query param or X-Dev-Token header.
+    if settings.dev_bypass_token:
+        dev_token = (
+            request.query_params.get("_dev_token")
+            or request.headers.get("X-Dev-Token")
+        )
+        if dev_token and dev_token == settings.dev_bypass_token:
+            return await _resolve_dev_bypass_user(registry, settings)
+
+    # ── 7. No credentials ────────────────────────────────────────────
     return None
 
 
@@ -322,3 +333,18 @@ async def _resolve_api_key_user(registry, api_key: str) -> UserContext:
                 )
 
     raise AuthenticationError("Invalid API key")
+
+
+async def _resolve_dev_bypass_user(registry, settings) -> UserContext:
+    """Create a synthetic superadmin UserContext for dev/headless access.
+
+    This is gated by DEV_BYPASS_TOKEN in the caller — only reachable when
+    the env var is set AND the request supplies a matching token.
+    """
+    return UserContext(
+        user_id=UUID("00000000-0000-0000-0000-ffffffffffff"),
+        email="dev-bypass@localhost",
+        display_name="Dev Bypass (Claude Code)",
+        is_superadmin=True,
+        tenant_roles={},
+    )
