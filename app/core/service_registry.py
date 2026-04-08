@@ -15,6 +15,7 @@ from app.services.users.service import UsersService
 from app.services.search.service import SearchService
 from app.services.settings.service import SettingsService
 from app.services.items.service import ItemsService
+from app.services.files.service import FilesService
 
 
 class ServiceRegistry:
@@ -24,7 +25,11 @@ class ServiceRegistry:
     then composite services that depend on others.
     """
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        uploads_base_dir: str = "uploads",
+    ) -> None:
         # Layer 1: Infrastructure services (no cross-service deps)
         self.audit = AuditService(session_factory)
         self.auth = AuthService(session_factory, self.audit)
@@ -34,6 +39,7 @@ class ServiceRegistry:
 
         # Layer 2: Domain services
         self.items = ItemsService(session_factory, self.audit)
+        self.files = FilesService(uploads_base_dir, self.audit)
 
         # Layer 3: Composite / cross-domain services
         self.search = SearchService(

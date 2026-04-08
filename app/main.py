@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Wire up service registry
     session_factory = get_session_factory()
-    app.state.registry = ServiceRegistry(session_factory)
+    app.state.registry = ServiceRegistry(session_factory, uploads_base_dir=settings.uploads_base_dir)
 
     # Seed roles if they don't exist
     await _seed_roles(session_factory)

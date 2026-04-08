@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     rate_limit_auth: str = "5/minute"
     rate_limit_api: str = "60/minute"
 
+    # File manager
+    uploads_base_dir: str = "uploads"
+
     # Initial admin (first-run setup only)
     init_admin_email: str = "admin@example.com"
     init_admin_password: str = "changeme"

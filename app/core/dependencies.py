@@ -16,6 +16,7 @@ from app.services.users.service import UsersService
 from app.services.search.service import SearchService
 from app.services.settings.service import SettingsService
 from app.services.items.service import ItemsService
+from app.services.files.service import FilesService
 
 
 def _registry(request: Request) -> ServiceRegistry:
@@ -46,3 +47,6 @@ def get_search_service(reg: ServiceRegistry = Depends(_registry)) -> SearchServi
 
 def get_items_service(reg: ServiceRegistry = Depends(_registry)) -> ItemsService:
     return reg.items
+
+def get_files_service(reg: ServiceRegistry = Depends(_registry)) -> FilesService:
+    return reg.files
