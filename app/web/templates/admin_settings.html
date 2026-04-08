@@ -79,13 +79,20 @@ function adminSettings() {
     },
 
     async _loadTab(tab) {
-      const currentValues = await fetchSettings(tab);
-      const isSuperadmin = true;   // page is superadmin-gated by the server route
+      const raw = await fetchSettings(tab);
+      const isSuperadmin = true;  // page is superadmin-gated by the server route
+
+      // Extract and initialise layout overrides (stored under the reserved _layout key)
+      if (tab === 'global' && raw._layout) {
+        initSettingsLayoutOverrides(raw._layout);
+        delete raw._layout;
+      }
+
       renderSettingsWidgets(
         `settings-${tab}-container`,
         tab,
         isSuperadmin,
-        currentValues,
+        raw,
         async (_tab, values) => patchSettings(_tab, values)
       );
     },

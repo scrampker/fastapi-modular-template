@@ -23,9 +23,83 @@
  *   dangerous   {boolean}  - Renders a warning badge next to the label
  *   buttonLabel {string}   - For type:"button" — the button text
  *   buttonAction{string}   - For type:"button" — JS expression to eval (receives settings context)
+ *
+ * Layout overrides (admin-only):
+ *   Superadmins can drag-and-drop fields to reorder them, toggle visibility
+ *   (superadmin-only vs. all users), and move fields between tabs via
+ *   right-click context menu.  Overrides are stored server-side under the
+ *   reserved key `_layout` in the global settings object so they survive
+ *   page reloads.
  */
 
 'use strict';
+
+/* ── Layout override state ───────────────────────────────────────────────── */
+
+/**
+ * Persisted per-field overrides: { [id]: { visibility?, tab?, group?, order? } }
+ * Loaded from / saved to the `_layout` key of the global settings endpoint.
+ * Backward-compat: a plain string value is treated as { visibility: value }.
+ */
+let _settingsLayoutOverrides = {};
+
+/** True while the superadmin is in layout-edit mode. */
+let _settingsEditMode = false;
+
+/** Field id currently being dragged (set during dragstart). */
+let _settingsDragId = null;
+
+/** Which container/tab is currently rendered (set by renderSettingsWidgets). */
+let _settingsCurrentTab = null;
+let _settingsCurrentContainerId = null;
+let _settingsCurrentIsSuperadmin = false;
+let _settingsCurrentValues = {};
+let _settingsCurrentOnSave = null;
+
+/* ── Layout override helpers ─────────────────────────────────────────────── */
+
+function _getLayoutOverride(schema) {
+  const o = _settingsLayoutOverrides[schema.id];
+  if (!o) return null;
+  // Backward-compat: old format was just a string ('superadmin' | 'all')
+  if (typeof o === 'string') return { visibility: o };
+  return o;
+}
+
+/**
+ * Effective visibility for a field, considering admin layout overrides.
+ * Returns 'superadmin' or 'all'.
+ */
+function _getEffectiveVisibility(schema) {
+  const o = _getLayoutOverride(schema);
+  return o?.visibility || schema.visibility || 'all';
+}
+
+/**
+ * Effective tab for a field, considering admin layout overrides.
+ * When a field is moved to a different visibility tier the tab follows
+ * (e.g. moving from 'all' → 'superadmin' puts it on the 'global' tab).
+ */
+function _getEffectiveTab(schema) {
+  const o = _getLayoutOverride(schema);
+  if (o?.tab) return o.tab;
+  const vis = _getEffectiveVisibility(schema);
+  if (vis === 'all' && schema.tab === 'global') return schema._originalTab || 'user';
+  if (vis === 'superadmin' && schema.tab !== 'global') return 'global';
+  return schema.tab;
+}
+
+/** Effective group heading for a field. */
+function _getEffectiveGroup(schema) {
+  const o = _getLayoutOverride(schema);
+  return o?.group || schema.group || 'Other';
+}
+
+/** Effective sort order within a group (lower = earlier). */
+function _getEffectiveOrder(schema) {
+  const o = _getLayoutOverride(schema);
+  return o?.order ?? 999;
+}
 
 /* ── Schema ──────────────────────────────────────────────────────────────── */
 
@@ -227,33 +301,67 @@ const SETTINGS_SCHEMA = [
 /**
  * Render settings widgets into the element matching `containerId`.
  *
- * @param {string} containerId   - DOM id of the target element
- * @param {string} tab           - "global" | "user"
- * @param {boolean} isSuperadmin - Hide superadmin-only fields for non-superadmins
- * @param {Object} currentValues - Map of id → current value (from GET response)
- * @param {Function} onSave      - Async callback(tab, id, value) called on auto-save
+ * Layout overrides (superadmin only):
+ *   - Call initSettingsLayoutOverrides(overrides) before the first render to
+ *     pre-load persisted overrides (typically from the `_layout` key returned
+ *     by GET /api/v1/settings/global).
+ *   - Superadmins see a pencil (✎) button next to the tab heading that toggles
+ *     layout-edit mode.  In edit mode every field gains a drag handle for
+ *     reordering and a lock icon for toggling visibility tier.
+ *   - Right-click any field (superadmin only, regardless of edit mode) to open
+ *     a context menu with "Move to tab" and visibility-toggle options.
+ *   - Changes are persisted to PATCH /api/v1/settings/global as `{ _layout: {…} }`.
+ *
+ * @param {string}   containerId   - DOM id of the target element
+ * @param {string}   tab           - "global" | "user"
+ * @param {boolean}  isSuperadmin  - Hide superadmin-only fields for non-superadmins
+ * @param {Object}   currentValues - Map of id → current value (from GET response)
+ * @param {Function} onSave        - Async callback(tab, values) called on save
  */
 function renderSettingsWidgets(containerId, tab, isSuperadmin, currentValues, onSave) {
   const container = document.getElementById(containerId);
   if (!container) return;
 
-  const visible = SETTINGS_SCHEMA.filter(s =>
-    s.tab === tab &&
-    (s.visibility === 'all' || (s.visibility === 'superadmin' && isSuperadmin))
-  );
+  // Persist context for re-renders triggered by layout edits
+  _settingsCurrentTab = tab;
+  _settingsCurrentContainerId = containerId;
+  _settingsCurrentIsSuperadmin = isSuperadmin;
+  _settingsCurrentValues = currentValues;
+  _settingsCurrentOnSave = onSave;
 
-  // Group by `group`
+  // Filter fields visible for this tab (respecting layout overrides)
+  const visible = SETTINGS_SCHEMA.filter(s => {
+    const effTab = _getEffectiveTab(s);
+    const effVis = _getEffectiveVisibility(s);
+    if (effVis === 'superadmin' && !isSuperadmin) return false;
+    return effTab === tab;
+  });
+
+  // Sort by effective order, then group
+  visible.sort((a, b) => _getEffectiveOrder(a) - _getEffectiveOrder(b));
+
   const groups = {};
   for (const schema of visible) {
-    if (!groups[schema.group]) groups[schema.group] = [];
-    groups[schema.group].push(schema);
+    const g = _getEffectiveGroup(schema);
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(schema);
   }
 
+  const editBanner = _settingsEditMode ? `
+    <div class="flex items-center gap-2 mb-4 px-4 py-2 rounded-lg bg-amber-900/20 border border-amber-700/40 text-amber-400 text-xs">
+      <span>&#9998; Layout edit mode — drag &#9776; to reorder, click lock to toggle visibility, right-click to move tabs.</span>
+      <button onclick="settingsToggleEditMode()"
+              class="ml-auto underline cursor-pointer bg-transparent border-0 text-amber-400 text-xs">
+        Done
+      </button>
+    </div>` : '';
+
   const cards = Object.entries(groups).map(([groupName, fields]) => {
-    const fieldHtml = fields.map((s, idx) => renderField(s, currentValues, idx === fields.length - 1)).join('');
+    const fieldHtml = fields.map((s, idx) => renderField(s, currentValues, idx === fields.length - 1, isSuperadmin)).join('');
     return `
       <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 settings-card" data-group="${escapeHtml(groupName)}">
-        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5"
+            data-settings-group="${escapeHtml(groupName)}">
           ${escapeHtml(groupName)}
         </h2>
         <div class="space-y-0">${fieldHtml}</div>
@@ -270,7 +378,21 @@ function renderSettingsWidgets(containerId, tab, isSuperadmin, currentValues, on
       </div>`;
   });
 
-  container.innerHTML = cards.join('');
+  // Edit-mode toggle button (superadmin only, shown above the first tab's content)
+  const editToggle = isSuperadmin ? `
+    <div class="flex justify-end mb-2">
+      <button onclick="settingsToggleEditMode()"
+              id="settingsEditBtn-${escapeHtml(tab)}"
+              title="Edit layout — change visibility and order of settings"
+              class="text-xs px-2 py-1 rounded border transition-colors
+                     ${_settingsEditMode
+                       ? 'border-amber-600 text-amber-400 bg-amber-900/20'
+                       : 'border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-500'}">
+        &#9998; Edit layout
+      </button>
+    </div>` : '';
+
+  container.innerHTML = editToggle + editBanner + (cards.join('') || '<p class="text-slate-500 text-sm">No settings in this section.</p>');
 
   // Wire up Save buttons
   container.querySelectorAll('.save-btn').forEach(btn => {
@@ -288,32 +410,104 @@ function renderSettingsWidgets(containerId, tab, isSuperadmin, currentValues, on
 
   // Wire up visibility toggles (fields that show/hide dependents)
   _bindConditionalVisibility(container);
+
+  // Wire up right-click context menus (superadmin only)
+  if (isSuperadmin) {
+    container.querySelectorAll('[data-field-id]').forEach(fieldEl => {
+      fieldEl.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        _settingsWidgetContextMenu(e, fieldEl.dataset.fieldId, tab);
+      });
+    });
+  }
+
+  // Initialise drag-and-drop if in edit mode
+  if (_settingsEditMode) _initSettingsDrag(container);
+}
+
+/**
+ * Pre-load persisted layout overrides before calling renderSettingsWidgets.
+ * Typically called once after fetching settings:
+ *   const settings = await fetchSettings('global');
+ *   if (settings._layout) initSettingsLayoutOverrides(settings._layout);
+ *
+ * @param {Object} overrides - { [fieldId]: { visibility?, tab?, group?, order? } }
+ */
+function initSettingsLayoutOverrides(overrides) {
+  _settingsLayoutOverrides = overrides && typeof overrides === 'object' ? overrides : {};
+}
+
+/**
+ * Toggle layout-edit mode on/off and re-render the current tab.
+ * Called by the "Edit layout" button rendered in renderSettingsWidgets.
+ */
+function settingsToggleEditMode() {
+  _settingsEditMode = !_settingsEditMode;
+  if (_settingsCurrentContainerId) {
+    renderSettingsWidgets(
+      _settingsCurrentContainerId,
+      _settingsCurrentTab,
+      _settingsCurrentIsSuperadmin,
+      _settingsCurrentValues,
+      _settingsCurrentOnSave,
+    );
+  }
 }
 
 /* ── Field renderers ─────────────────────────────────────────────────────── */
 
-function renderField(schema, currentValues, isLast) {
+/**
+ * @param {Object}  schema        - SETTINGS_SCHEMA entry
+ * @param {Object}  currentValues - Live value map
+ * @param {boolean} isLast        - Whether this is the last field in its group
+ * @param {boolean} isSuperadmin  - Show edit controls for superadmins
+ */
+function renderField(schema, currentValues, isLast, isSuperadmin) {
   const val = currentValues.hasOwnProperty(schema.id) ? currentValues[schema.id] : schema.default;
   const borderClass = isLast ? '' : 'border-b border-slate-700';
-  const wrapper = `<div class="py-4 ${borderClass}" data-field-id="${escapeHtml(schema.id)}">`;
+  const effVis = _getEffectiveVisibility(schema);
+  const isSuperadminField = effVis === 'superadmin';
+
+  // Left accent border for superadmin-only fields
+  const accentStyle = isSuperadminField ? ' style="border-left:3px solid rgb(245 158 11 / 0.6);padding-left:12px;"' : '';
+
+  // Edit controls: drag handle + visibility lock toggle
+  let editControls = '';
+  if (_settingsEditMode && isSuperadmin) {
+    const lockIcon  = isSuperadminField ? '&#128274;' : '&#128275;';
+    const lockColor = isSuperadminField ? 'text-amber-400' : 'text-green-400';
+    const lockTitle = isSuperadminField
+      ? 'Superadmin-only — click to make visible to all users'
+      : 'Visible to all — click to make superadmin-only';
+    editControls = `
+      <span class="settings-drag-handle cursor-grab text-slate-500 text-sm px-1 flex-shrink-0
+                   select-none hover:text-slate-300 transition-colors"
+            draggable="true"
+            data-drag-id="${escapeHtml(schema.id)}"
+            title="Drag to reorder">&#9776;</span>
+      <button type="button"
+              onclick="_settingsToggleVisibility('${escapeHtml(schema.id)}')"
+              class="${lockColor} bg-transparent border-0 text-sm px-1 flex-shrink-0 cursor-pointer
+                     hover:opacity-70 transition-opacity"
+              title="${escapeHtml(lockTitle)}">${lockIcon}</button>`;
+  }
+
+  const wrapper = `<div class="py-4 ${borderClass} ${_settingsEditMode ? 'flex items-center gap-2' : ''}"
+                        data-field-id="${escapeHtml(schema.id)}"${accentStyle}>`;
   const closeWrapper = '</div>';
 
+  let fieldHtml;
   switch (schema.type) {
-    case 'toggle':
-      return wrapper + renderToggle(schema, val) + closeWrapper;
-    case 'select':
-      return wrapper + renderSelect(schema, val) + closeWrapper;
-    case 'number':
-      return wrapper + renderNumber(schema, val) + closeWrapper;
-    case 'text':
-      return wrapper + renderText(schema, val) + closeWrapper;
-    case 'password':
-      return wrapper + renderPassword(schema, val) + closeWrapper;
-    case 'button':
-      return wrapper + renderActionButton(schema) + closeWrapper;
-    default:
-      return '';
+    case 'toggle':   fieldHtml = renderToggle(schema, val); break;
+    case 'select':   fieldHtml = renderSelect(schema, val); break;
+    case 'number':   fieldHtml = renderNumber(schema, val); break;
+    case 'text':     fieldHtml = renderText(schema, val);   break;
+    case 'password': fieldHtml = renderPassword(schema, val); break;
+    case 'button':   fieldHtml = renderActionButton(schema); break;
+    default:         return '';
   }
+
+  return wrapper + editControls + `<div class="${_settingsEditMode ? 'flex-1 min-w-0' : ''}">${fieldHtml}</div>` + closeWrapper;
 }
 
 function _labelHtml(schema) {
@@ -563,6 +757,265 @@ async function _handleGroupSave(btn, tab, groups, onSave) {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Save';
+  }
+}
+
+/* ── Layout edit helpers ─────────────────────────────────────────────────── */
+
+/**
+ * Merge `changes` into the override record for `fieldId` and persist to the
+ * server as PATCH /api/v1/settings/global with body `{ _layout: { … } }`.
+ * Re-renders the current container afterwards.
+ *
+ * @param {string} fieldId  - SETTINGS_SCHEMA id
+ * @param {Object} changes  - Partial override { visibility?, tab?, group?, order? }
+ */
+async function _settingsUpdateLayout(fieldId, changes) {
+  const existing = _settingsLayoutOverrides[fieldId];
+  const base = (existing && typeof existing === 'object')
+    ? existing
+    : (typeof existing === 'string' ? { visibility: existing } : {});
+  _settingsLayoutOverrides[fieldId] = { ...base, ...changes };
+
+  try {
+    await fetch('/api/v1/settings/global', {
+      method: 'PATCH',
+      headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ _layout: _settingsLayoutOverrides }),
+    });
+  } catch (_) {
+    showToast('Failed to save layout', 'error');
+  }
+
+  if (_settingsCurrentContainerId) {
+    renderSettingsWidgets(
+      _settingsCurrentContainerId,
+      _settingsCurrentTab,
+      _settingsCurrentIsSuperadmin,
+      _settingsCurrentValues,
+      _settingsCurrentOnSave,
+    );
+  }
+}
+
+/**
+ * Toggle a field between 'superadmin' and 'all' visibility.
+ * Also adjusts the effective tab to match: superadmin → global, all → original.
+ */
+function _settingsToggleVisibility(fieldId) {
+  const schema = SETTINGS_SCHEMA.find(s => s.id === fieldId);
+  if (!schema) return;
+  const current = _getEffectiveVisibility(schema);
+  const newVis = current === 'superadmin' ? 'all' : 'superadmin';
+  const newTab = newVis === 'superadmin'
+    ? 'global'
+    : (schema.tab === 'global' ? (schema._originalTab || 'user') : schema.tab);
+  _settingsUpdateLayout(fieldId, { visibility: newVis, tab: newTab });
+}
+
+/**
+ * Move a field to a different tab (and set visibility accordingly).
+ * Called from the context menu.
+ */
+function _settingsMoveWidget(fieldId, targetTab) {
+  document.querySelectorAll('.settings-ctx-menu').forEach(el => el.remove());
+  const vis = targetTab === 'global' ? 'superadmin' : 'all';
+  _settingsUpdateLayout(fieldId, { tab: targetTab, visibility: vis });
+  showToast(`Moved to ${targetTab}`, 'success');
+}
+
+/**
+ * Show a right-click context menu for a settings field.
+ * Available to superadmins regardless of edit mode.
+ *
+ * @param {MouseEvent} event
+ * @param {string}     fieldId
+ * @param {string}     currentTab - active tab id
+ */
+function _settingsWidgetContextMenu(event, fieldId, currentTab) {
+  document.querySelectorAll('.settings-ctx-menu').forEach(el => el.remove());
+  const schema = SETTINGS_SCHEMA.find(s => s.id === fieldId);
+  if (!schema) return;
+
+  const isAdminVis = _getEffectiveVisibility(schema) === 'superadmin';
+
+  // Build "Move to tab" options (exclude the tab the field already lives on)
+  const availableTabs = ['global', 'user'];
+  const moveOpts = availableTabs
+    .filter(t => t !== currentTab)
+    .map(t => `<button data-move-to="${escapeHtml(t)}">&rarr; ${escapeHtml(t.charAt(0).toUpperCase() + t.slice(1))}</button>`)
+    .join('');
+
+  const menu = document.createElement('div');
+  menu.className = 'settings-ctx-menu';
+  menu.innerHTML = `
+    <button data-action="toggleVis">
+      ${isAdminVis ? '&#128275; Make visible to all users' : '&#128274; Make superadmin-only'}
+    </button>
+    <div style="border-top:1px solid rgba(148,163,184,0.15);margin:3px 0"></div>
+    <div style="padding:3px 10px;font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em">Move to tab</div>
+    ${moveOpts}
+  `;
+
+  const x = Math.min(event.clientX, window.innerWidth - 230);
+  const y = Math.min(event.clientY, window.innerHeight - 160);
+  Object.assign(menu.style, {
+    position: 'fixed',
+    left: `${x}px`,
+    top: `${y}px`,
+    zIndex: '9500',
+    background: 'rgb(30 41 59)',       // slate-800
+    border: '1px solid rgb(51 65 85)', // slate-700
+    borderRadius: '8px',
+    padding: '4px',
+    boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+    minWidth: '200px',
+  });
+
+  menu.querySelectorAll('button').forEach(btn => {
+    Object.assign(btn.style, {
+      display: 'block',
+      width: '100%',
+      textAlign: 'left',
+      background: 'none',
+      border: 'none',
+      color: 'rgb(226 232 240)', // slate-200
+      padding: '7px 10px',
+      fontSize: '12px',
+      cursor: 'pointer',
+      borderRadius: '4px',
+    });
+    btn.addEventListener('mouseover', () => { btn.style.background = 'rgba(148,163,184,0.1)'; });
+    btn.addEventListener('mouseout',  () => { btn.style.background = 'none'; });
+
+    if (btn.dataset.action === 'toggleVis') {
+      btn.addEventListener('click', () => _settingsToggleVisibility(fieldId));
+    } else if (btn.dataset.moveTo) {
+      btn.addEventListener('click', () => _settingsMoveWidget(fieldId, btn.dataset.moveTo));
+    }
+  });
+
+  document.body.appendChild(menu);
+  const close = e => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('click', close);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', close), 10);
+}
+
+/* ── Drag-and-drop reordering ────────────────────────────────────────────── */
+
+/**
+ * Attach HTML5 drag-and-drop listeners to all field rows and group headings
+ * inside `container`.  Called at the end of renderSettingsWidgets when
+ * edit mode is active.
+ *
+ * @param {HTMLElement} container
+ */
+function _initSettingsDrag(container) {
+  container.querySelectorAll('.settings-drag-handle').forEach(handle => {
+    handle.addEventListener('dragstart', e => {
+      _settingsDragId = handle.dataset.dragId;
+      e.dataTransfer.effectAllowed = 'move';
+      const row = handle.closest('[data-field-id]');
+      if (row) row.style.opacity = '0.4';
+    });
+
+    handle.addEventListener('dragend', () => {
+      _settingsDragId = null;
+      container.querySelectorAll('[data-field-id]').forEach(el => {
+        el.style.opacity = '';
+        el.style.outline = '';
+      });
+    });
+  });
+
+  container.querySelectorAll('[data-field-id]').forEach(row => {
+    row.addEventListener('dragover', e => {
+      if (!_settingsDragId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      row.style.outline = '2px solid rgb(59 130 246)'; // blue-500
+    });
+    row.addEventListener('dragleave', () => { row.style.outline = ''; });
+    row.addEventListener('drop', e => {
+      e.preventDefault();
+      row.style.outline = '';
+      if (!_settingsDragId) return;
+      const targetId = row.dataset.fieldId;
+      if (targetId && targetId !== _settingsDragId) {
+        _settingsReorder(_settingsDragId, targetId);
+      }
+    });
+  });
+
+  // Dropping onto a group heading moves the field into that group at position 0
+  container.querySelectorAll('[data-settings-group]').forEach(heading => {
+    heading.addEventListener('dragover', e => {
+      if (!_settingsDragId) return;
+      e.preventDefault();
+      heading.style.outline = '2px solid rgb(59 130 246)';
+    });
+    heading.addEventListener('dragleave', () => { heading.style.outline = ''; });
+    heading.addEventListener('drop', e => {
+      e.preventDefault();
+      heading.style.outline = '';
+      if (!_settingsDragId) return;
+      const groupName = heading.dataset.settingsGroup || heading.textContent.trim();
+      _settingsUpdateLayout(_settingsDragId, { group: groupName, order: 0 });
+    });
+  });
+}
+
+/**
+ * Reorder the dragged field to appear before `targetId` within the current tab,
+ * placing it into the same group as the target.
+ */
+function _settingsReorder(draggedId, targetId) {
+  const tab = _settingsCurrentTab;
+  const widgets = SETTINGS_SCHEMA.filter(s => _getEffectiveTab(s) === tab);
+  widgets.sort((a, b) => _getEffectiveOrder(a) - _getEffectiveOrder(b));
+
+  const ids = widgets.map(w => w.id);
+  const fromIdx = ids.indexOf(draggedId);
+  const toIdx   = ids.indexOf(targetId);
+  if (fromIdx < 0 || toIdx < 0) return;
+
+  ids.splice(fromIdx, 1);
+  ids.splice(toIdx, 0, draggedId);
+
+  const targetSchema = SETTINGS_SCHEMA.find(s => s.id === targetId);
+  const targetGroup  = _getEffectiveGroup(targetSchema);
+
+  // Write new order values back into _settingsLayoutOverrides
+  ids.forEach((id, i) => {
+    const existing = _settingsLayoutOverrides[id];
+    const base = (existing && typeof existing === 'object')
+      ? existing
+      : (typeof existing === 'string' ? { visibility: existing } : {});
+    _settingsLayoutOverrides[id] = { ...base, order: i };
+  });
+  // Also adopt the target group for the dragged field
+  _settingsLayoutOverrides[draggedId] = { ..._settingsLayoutOverrides[draggedId], group: targetGroup };
+
+  // Batch-persist the entire layout map
+  fetch('/api/v1/settings/global', {
+    method: 'PATCH',
+    headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ _layout: _settingsLayoutOverrides }),
+  }).catch(() => showToast('Failed to save layout', 'error'));
+
+  // Re-render immediately
+  if (_settingsCurrentContainerId) {
+    renderSettingsWidgets(
+      _settingsCurrentContainerId,
+      _settingsCurrentTab,
+      _settingsCurrentIsSuperadmin,
+      _settingsCurrentValues,
+      _settingsCurrentOnSave,
+    );
   }
 }
 
