@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="/static/manifest.json" />
   <title>{% block title %}{{ app_name }}{% endblock %} — {{ app_name }}</title>
 
   <!-- Tailwind CSS via CDN (dev) -->
@@ -1409,6 +1411,15 @@ function taskSwitcherPanel() {
 </script>
 
 {% include "partials/command_palette.html" %}
+
+<!-- Service Worker registration — scope must be "/" so sw.js is served from root -->
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(function (err) {
+      console.warn('Service worker registration failed:', err);
+    });
+  }
+</script>
 
 </body>
 </html>

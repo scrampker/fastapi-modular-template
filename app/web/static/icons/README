@@ -1,0 +1,11 @@
+Place PWA icon files here:
+
+  icon-192.png  — 192x192 px, referenced by manifest.json
+  icon-512.png  — 512x512 px, referenced by manifest.json
+
+Both should use "purpose": "any maskable" so they work on Android
+adaptive icon circles and iOS home screen rounding.
+
+Quick generation from a single source PNG (requires ImageMagick):
+  convert source.png -resize 192x192 icon-192.png
+  convert source.png -resize 512x512 icon-512.png

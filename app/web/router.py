@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 web_router = APIRouter()
@@ -14,6 +14,21 @@ web_router = APIRouter()
 # regardless of the working directory the server is started from.
 _TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+
+
+# ── Service Worker (must be served from root scope, not /static/) ─────────────
+
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+@web_router.get("/sw.js", include_in_schema=False)
+async def service_worker() -> FileResponse:
+    """Serve the service worker from root scope so it can control all pages."""
+    return FileResponse(
+        path=os.path.join(_STATIC_DIR, "sw.js"),
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/"},
+    )
 
 
 # ── Root ──────────────────────────────────────────────────────────────────
