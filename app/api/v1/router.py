@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import admin, audit, auth, items, search, settings, tasks, tenants, users, ws
+from app.api.v1 import admin, audit, auth, files, items, search, settings, tasks, tenants, upload, users, ws
 
 api_v1_router = APIRouter()
 
@@ -43,6 +43,16 @@ api_v1_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 # Tasks (background task lifecycle)
 api_v1_router.include_router(tasks.router)
+
+# File manager (tenant-scoped)
+api_v1_router.include_router(
+    files.router,
+    prefix="/tenants/{slug}/files",
+    tags=["files"],
+)
+
+# File upload
+api_v1_router.include_router(upload.router, prefix="/upload", tags=["upload"])
 
 # WebSocket (task streaming)
 api_v1_router.include_router(ws.router)
