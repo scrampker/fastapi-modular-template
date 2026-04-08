@@ -23,6 +23,7 @@
  *   dangerous   {boolean}  - Renders a warning badge next to the label
  *   buttonLabel {string}   - For type:"button" — the button text
  *   buttonAction{string}   - For type:"button" — JS expression to eval (receives settings context)
+ *   comingSoon  {boolean}  - Grey out field with "coming soon" badge (visible but not interactive)
  *
  * Layout overrides (admin-only):
  *   Superadmins can drag-and-drop fields to reorder them, toggle visibility
@@ -507,14 +508,23 @@ function renderField(schema, currentValues, isLast, isSuperadmin) {
     default:         return '';
   }
 
-  return wrapper + editControls + `<div class="${_settingsEditMode ? 'flex-1 min-w-0' : ''}">${fieldHtml}</div>` + closeWrapper;
+  const inner = wrapper + editControls + `<div class="${_settingsEditMode ? 'flex-1 min-w-0' : ''}">${fieldHtml}</div>` + closeWrapper;
+
+  // Grey out unimplemented features — visible but not interactive
+  if (schema.comingSoon) {
+    return `<div class="opacity-50 pointer-events-none select-none">${inner}</div>`;
+  }
+  return inner;
 }
 
 function _labelHtml(schema) {
   const dangerBadge = schema.dangerous
     ? '<span class="ml-2 px-1.5 py-0.5 rounded text-xs font-medium bg-amber-900/60 text-amber-400 border border-amber-700/50">caution</span>'
     : '';
-  return `<p class="text-sm font-medium text-slate-200">${escapeHtml(schema.label)}${dangerBadge}</p>`;
+  const comingSoonBadge = schema.comingSoon
+    ? '<span class="ml-2 px-1.5 py-0.5 rounded text-xs bg-slate-700 text-slate-400 border border-slate-600">coming soon</span>'
+    : '';
+  return `<p class="text-sm font-medium text-slate-200">${escapeHtml(schema.label)}${dangerBadge}${comingSoonBadge}</p>`;
 }
 
 function _descriptionHtml(schema) {
