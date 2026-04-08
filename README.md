@@ -1,8 +1,6 @@
-# FastAPI Modular Template
+# ScottyCore
 
-A production-ready FastAPI template for building multi-tenant web applications
-with role-based access control, pluggable service modules, and a full deployment
-stack out of the box.
+The shared core framework for the Scotty app family (ScottyStrike, ScottyScribe, ScottyScan). A production-ready FastAPI template for building multi-tenant web applications with role-based access control, pluggable service modules, and a full deployment stack out of the box.
 
 ---
 

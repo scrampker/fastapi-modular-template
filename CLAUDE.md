@@ -1,10 +1,69 @@
-# FastAPI Modular Template
+# ScottyCore
 
 ## What This Is
 
-A battle-tested reusable project template for building multi-tenant web applications with FastAPI. Extracted from ScottyScan (50 API endpoints, 14 service modules, 15 GUI pages, full security review). Designed so multiple AI agents can build different modules simultaneously with zero merge conflicts.
+The shared core framework and orchestration hub for the Scotty app family. A battle-tested reusable template for building multi-tenant web applications with FastAPI, extracted from ScottyScan (50 API endpoints, 14 service modules, 15 GUI pages, full security review). Designed so multiple AI agents can build different modules simultaneously with zero merge conflicts.
 
-This is a **living shared template**. Multiple Claude Code environments pull from it, use it as a starting point for new apps, and push generic improvements back. Domain-specific code stays in each app's own repo; universal infrastructure patterns go here.
+This is a **living shared framework**. The three Scotty apps pull from it, use it as a foundation, and push generic improvements back. Domain-specific code stays in each app's own repo; universal infrastructure patterns live here.
+
+## The Scotty App Family
+
+| App | Location | Stack | Domain |
+|-----|----------|-------|--------|
+| **ScottyStrike** | `/script/scottystrike` | FastAPI (from this template) | CrowdStrike LogScale parser toolkit |
+| **ScottyScribe** | `/script/scottyscribe` | Flask + WhisperX + GPU | AI-powered PM tool (kanban, AI search, transcription, pinned factoids) |
+| **ScottyScan** | `/script/ScottyScan` | PowerShell + webapp | Network vulnerability scanning & OpenVAS validation |
+
+## Cross-App Orchestration
+
+### How It Works
+
+ScottyCore is the single source of truth for shared patterns. When you run Claude Code from `/script/scottycore`, you have access to orchestration agents that manage all three apps:
+
+1. **Bug fix in any app** -> Core Sync Agent checks if the fix is relevant to the other two apps -> each app's Manager Agent evaluates and applies if appropriate
+2. **ScottyCore template change** -> Core Sync Agent produces a sync report for each app -> Manager Agents merge or skip
+3. **Generic pattern discovered in an app** -> Core Sync Agent extracts it, strips domain-specific naming, adds it to ScottyCore -> propagates to other apps
+
+### Agent Architecture
+
+```
+ScottyCore (you are here)
+│
+├── core-sync agent          — bidirectional sync between core and apps
+│
+├── scottystrike-manager     — dedicated agent for ScottyStrike
+│   ├── UX sub-agent         — GUI (Jinja2 + HTMX + Alpine.js)
+│   ├── PM sub-agent         — GitHub Issues + milestones
+│   └── DEV sub-agent        — FastAPI modules, parser scripts
+│
+├── scottyscribe-manager     — dedicated agent for ScottyScribe
+│   ├── UX sub-agent         — PWA (single-page, mobile-first)
+│   ├── PM sub-agent         — GitHub Issues
+│   └── DEV sub-agent        — Flask blueprints, ML pipeline
+│
+└── scottyscan-manager       — dedicated agent for ScottyScan
+    ├── UX sub-agent         — webapp + TUI console
+    ├── PM sub-agent         — GitHub Issues
+    └── DEV sub-agent        — PowerShell plugins, webapp
+
+```
+
+### Agent Files
+- `.claude/agents/core-sync.md` — bidirectional sync logic
+- `.claude/agents/scottystrike-manager.md` — ScottyStrike management
+- `.claude/agents/scottyscribe-manager.md` — ScottyScribe management
+- `.claude/agents/scottyscan-manager.md` — ScottyScan management
+
+### Workflow Commands
+
+**After fixing a bug in an app:**
+> "I just fixed [description] in ScottyStrike. Check if ScottyScribe and ScottyScan need the same fix."
+
+**After changing ScottyCore:**
+> "I updated the auth middleware in core. Produce sync reports for all three apps."
+
+**After building something generic in an app:**
+> "The file manager service I built in ScottyStrike should be extracted to core."
 
 ## Architecture: Contract-First Modular Service Layer
 
@@ -325,7 +384,7 @@ Also includes: server status indicator (nav), task switcher (Tab key), tricolor 
 ## How to Use This Template
 
 ### Starting a new app:
-1. `git clone https://github.com/scrampker/fastapi-modular-template.git my-app`
+1. `git clone https://github.com/scrampker/scottycore.git my-app`
 2. `cd my-app && rm -rf .git && git init` (or keep the remote to pull template updates)
 3. Rename `app/` to your project name
 4. Update `pyproject.toml` (name, description, packages path)
@@ -349,10 +408,10 @@ Also includes: server status indicator (nav), task switcher (Tab key), tricolor 
 ## Contributing Back to the Template
 
 When building any app and you discover a generic improvement:
-1. `cd /script/fastapi-modular-template && git pull`
+1. `cd /script/scottycore && git pull`
 2. Make the change (strip domain-specific details, use "tenant"/"items" naming)
-3. Test that the template still starts: `cd /script/fastapi-modular-template && pip install -e . && uvicorn app.main:app`
-4. Commit and push to `scrampker/fastapi-modular-template`
+3. Test that the template still starts: `cd /script/scottycore && pip install -e . && uvicorn app.main:app`
+4. Commit and push to `scrampker/scottycore`
 5. **NEVER put app-specific domain code in the template** — only universal infrastructure
 
 ## Environment Variables
