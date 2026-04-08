@@ -16,9 +16,11 @@ class SearchResultItem(BaseModel):
     subtitle: str | None = None
     url: str
     meta: dict | None = None
+    highlight: str | None = None
 
 
 class SearchResults(BaseModel):
     query: str
     results: dict[str, list[SearchResultItem]]
     total: int
+    items: list[SearchResultItem] = []

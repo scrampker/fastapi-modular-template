@@ -2,16 +2,113 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.items.models import Item
 from app.services.items.schemas import ItemFilter
 
+# Sentinel returned alongside each FTS row.
+_NO_HIGHLIGHT = ""
+
 
 class ItemRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _is_postgresql(self) -> bool:
+        """Return True when the underlying dialect is PostgreSQL."""
+        return self._session.bind.dialect.name == "postgresql"  # type: ignore[union-attr]
+
+    def update_search_vector(self, item: Item) -> None:
+        """Populate the search_vector column from the item's searchable fields.
+
+        Call this after creating or updating an item, before flushing.
+        The column stores plain concatenated text so that:
+        - PostgreSQL can feed it to ``to_tsvector()`` via SQL at query time.
+        - SQLite can use simple LIKE matching against the same column.
+        """
+        parts = [item.name or ""]
+        if item.description:
+            parts.append(item.description)
+        item.search_vector = " ".join(parts)
+
+    # ------------------------------------------------------------------
+    # FTS search
+    # ------------------------------------------------------------------
+
+    async def search_fts(
+        self,
+        tenant_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[tuple[Item, str]]:
+        """Search items using PostgreSQL FTS or a SQLite LIKE fallback.
+
+        Returns a list of ``(Item, highlight)`` tuples where *highlight* is
+        either a ``ts_headline``-formatted snippet (PostgreSQL) or the raw
+        ``name`` field (SQLite).
+        """
+        if self._is_postgresql():
+            return await self._search_fts_pg(tenant_id, query, limit)
+        return await self._search_fts_sqlite(tenant_id, query, limit)
+
+    async def _search_fts_pg(
+        self,
+        tenant_id: str,
+        query: str,
+        limit: int,
+    ) -> list[tuple[Item, str]]:
+        """PostgreSQL path: websearch_to_tsquery + ts_rank + ts_headline."""
+        tsquery = func.websearch_to_tsquery("english", query)
+        tsvector = func.to_tsvector("english", func.coalesce(Item.search_vector, ""))
+
+        stmt = (
+            select(
+                Item,
+                func.ts_headline(
+                    "english",
+                    func.coalesce(Item.search_vector, ""),
+                    tsquery,
+                    "StartSel=<mark>, StopSel=</mark>, MaxWords=30, MinWords=10",
+                ).label("highlight"),
+            )
+            .where(Item.tenant_id == tenant_id)
+            .where(tsvector.op("@@")(tsquery))
+            .order_by(func.ts_rank(tsvector, tsquery).desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(row[0], row[1] or "") for row in rows]
+
+    async def _search_fts_sqlite(
+        self,
+        tenant_id: str,
+        query: str,
+        limit: int,
+    ) -> list[tuple[Item, str]]:
+        """SQLite fallback: LIKE match per query word against search_vector."""
+        words = [w for w in query.split() if w]
+        if not words:
+            return []
+
+        base = select(Item).where(Item.tenant_id == tenant_id)
+        for word in words:
+            like = f"%{word}%"
+            base = base.where(
+                or_(Item.name.ilike(like), Item.description.ilike(like))
+            )
+        base = base.limit(limit)
+        items = (await self._session.scalars(base)).all()
+        return [(item, item.name) for item in items]
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
 
     async def create(
         self,
@@ -26,6 +123,7 @@ class ItemRepository:
             description=description,
             created_by=created_by,
         )
+        self.update_search_vector(item)
         self._session.add(item)
         await self._session.flush()
         return item
@@ -55,6 +153,7 @@ class ItemRepository:
     async def update(self, item: Item, **kwargs: object) -> Item:
         for key, value in kwargs.items():
             setattr(item, key, value)
+        self.update_search_vector(item)
         await self._session.flush()
         return item
 

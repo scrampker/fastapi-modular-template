@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.services.items.repository import ItemRepository
 from app.services.tenants.models import Tenant
 from app.services.tenants.service import TenantsService
 from app.services.search.schemas import SearchResultItem, SearchResults
@@ -51,6 +54,7 @@ class SearchService:
         q: str,
         tenant_slug: str | None,
         is_superadmin: bool,
+        tenant_id: UUID | None = None,
     ) -> SearchResults:
         """Run a cross-domain search and return grouped results."""
         like = f"%{q}%"
@@ -60,15 +64,52 @@ class SearchService:
                 await self._search_tenants(session, like) if is_superadmin else []
             )
             settings = self._search_settings(q, tenant_slug or "default")
+            items_list = (
+                await self._search_items(session, str(tenant_id), q)
+                if tenant_id is not None
+                else []
+            )
 
         results: dict[str, list[SearchResultItem]] = {}
         if tenants_list:
             results["tenants"] = tenants_list
         if settings:
             results["settings"] = settings
+        if items_list:
+            results["items"] = items_list
 
         total = sum(len(v) for v in results.values())
-        return SearchResults(query=q, results=results, total=total)
+        return SearchResults(query=q, results=results, total=total, items=items_list)
+
+    async def search_items(
+        self,
+        tenant_id: UUID,
+        query: str,
+        limit: int = _PER_CATEGORY,
+    ) -> list[SearchResultItem]:
+        """Search items by full-text search for a specific tenant."""
+        async with self._session_factory() as session:
+            return await self._search_items(session, str(tenant_id), query, limit)
+
+    async def _search_items(
+        self,
+        session: AsyncSession,
+        tenant_id: str,
+        q: str,
+        limit: int = _PER_CATEGORY,
+    ) -> list[SearchResultItem]:
+        repo = ItemRepository(session)
+        rows = await repo.search_fts(tenant_id, q, limit)
+        return [
+            SearchResultItem(
+                id=item.id,
+                title=item.name,
+                subtitle=item.description,
+                url=f"/c/{{slug}}/items/{item.id}",
+                highlight=highlight or None,
+            )
+            for item, highlight in rows
+        ]
 
     async def _search_tenants(
         self,
