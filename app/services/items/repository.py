@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -160,3 +162,17 @@ class ItemRepository:
     async def delete(self, item: Item) -> None:
         await self._session.delete(item)
         await self._session.flush()
+
+    async def list_older_than(self, tenant_id: str, cutoff: datetime) -> list[Item]:
+        """Return all items for *tenant_id* created before *cutoff*.
+
+        Used exclusively by the data-retention report — never deletes anything.
+        """
+        stmt = (
+            select(Item)
+            .where(Item.tenant_id == tenant_id)
+            .where(Item.created_at < cutoff)
+            .order_by(Item.created_at)
+        )
+        result = await self._session.scalars(stmt)
+        return list(result.all())

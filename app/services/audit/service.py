@@ -27,6 +27,44 @@ class AuditService:
             # In production, this should go to stderr or a fallback log.
             pass
 
+    async def log_data_access(
+        self,
+        user_id: UUID,
+        resource_type: str,
+        resource_id: str,
+        action: str = "view",
+        tenant_id: UUID | None = None,
+        ip_address: str = "unknown",
+    ) -> None:
+        """Convenience helper for PHI / sensitive data access audit events.
+
+        HIPAA-aligned modules that expose sensitive data MUST call this on
+        every read that returns patient or otherwise sensitive records.
+
+        Example::
+
+            await self._audit.log_data_access(
+                user_id=ctx.user_id,
+                resource_type="item",
+                resource_id=str(item.id),
+                action="view",
+                tenant_id=tenant_id,
+                ip_address=ctx.ip_address,
+            )
+
+        The ``action`` value should use the format ``"<resource_type>.<verb>"``
+        for consistency with the rest of the audit log (e.g. ``"item.view"``,
+        ``"record.list"``).
+        """
+        await self.log(AuditLogCreate(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            action=f"{resource_type}.{action}",
+            target_type=resource_type,
+            target_id=resource_id,
+            ip_address=ip_address,
+        ))
+
     async def list_logs(
         self, tenant_id: UUID | None, filters: AuditLogFilter
     ) -> PaginatedResponse[AuditLogRead]:

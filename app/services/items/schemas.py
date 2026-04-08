@@ -37,3 +37,17 @@ class ItemRead(BaseModel):
 class ItemFilter(PaginationParams):
     is_active: bool | None = None
     search: str | None = None
+
+
+class ItemRetentionReport(BaseModel):
+    """Read-only report of items that exceed the tenant's retention policy.
+
+    This schema is the response type for ``GET /tenants/{slug}/retention/report``.
+    No items are deleted — this is informational only.
+    """
+
+    tenant_id: UUID
+    retention_days: int
+    cutoff_date: datetime
+    affected_count: int
+    affected_items: list[ItemRead]

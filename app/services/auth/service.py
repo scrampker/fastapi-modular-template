@@ -14,20 +14,25 @@ import pyotp
 import qrcode
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from app.core.config import get_settings
 from app.core.exceptions import AuthenticationError
 from app.services.audit.schemas import AuditLogCreate
 from app.services.audit.service import AuditService
-from app.services.auth.models import RefreshToken
+from app.services.auth.models import LoginAttempt, RefreshToken
 from app.services.auth.schemas import BackupCodesResponse, TOTPSetupResponse, TokenResponse, UserContext
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 _BACKUP_CODE_COUNT = 8
 _TOTP_PARTIAL_TOKEN_MINUTES = 5
+
+# Account lockout policy
+_MAX_FAILED_ATTEMPTS = 5        # consecutive failures allowed before lockout
+_LOCKOUT_WINDOW_MINUTES = 15    # rolling window to count failures in
+_LOCKOUT_DURATION_MINUTES = 30  # how long the account stays locked
 
 
 class AuthService:
@@ -67,6 +72,7 @@ class AuthService:
         user_id: UUID,
         extra_claims: dict | None = None,
         totp_pending: bool = False,
+        session_version: int = 0,
     ) -> str:
         now = datetime.now(timezone.utc)
         expire_minutes = (
@@ -80,6 +86,7 @@ class AuthService:
             "type": "access",
             "iat": now,
             "exp": expires,
+            "sv": session_version,  # session_version claim for forced re-auth
         }
         if totp_pending:
             payload["totp_pending"] = True
@@ -167,6 +174,64 @@ class AuthService:
             access_token=access_token,
             expires_in=self._settings.jwt_access_token_expire_minutes * 60,
         )
+
+    # ── Account lockout ────────────────────────────────────────────────
+
+    async def record_login_attempt(
+        self, email: str, success: bool, ip_address: str = "unknown"
+    ) -> None:
+        """Persist a login attempt record.  Never raises — failures are silent."""
+        try:
+            async with self._session_factory() as session:
+                attempt = LoginAttempt(
+                    email=email.lower(),
+                    success=success,
+                    ip_address=ip_address,
+                )
+                session.add(attempt)
+                await session.commit()
+        except Exception:
+            pass
+
+    async def check_lockout(self, email: str) -> bool:
+        """Return True if the account is currently locked out.
+
+        Locked when there are >= _MAX_FAILED_ATTEMPTS consecutive failures
+        within the last _LOCKOUT_WINDOW_MINUTES, and the most recent failure
+        is less than _LOCKOUT_DURATION_MINUTES old.
+
+        Implementation: count failures in the rolling window, but stop counting
+        when a success is encountered (resets the streak).
+        """
+        window_start = datetime.now(timezone.utc) - timedelta(minutes=_LOCKOUT_WINDOW_MINUTES)
+        lockout_start = datetime.now(timezone.utc) - timedelta(minutes=_LOCKOUT_DURATION_MINUTES)
+
+        async with self._session_factory() as session:
+            result = await session.scalars(
+                select(LoginAttempt)
+                .where(
+                    LoginAttempt.email == email.lower(),
+                    LoginAttempt.attempted_at >= window_start,
+                )
+                .order_by(LoginAttempt.attempted_at.desc())
+            )
+            recent_attempts = result.all()
+
+        # Count consecutive failures from most recent
+        consecutive_failures = 0
+        for attempt in recent_attempts:
+            if attempt.success:
+                break  # A success resets the streak
+            consecutive_failures += 1
+
+        if consecutive_failures < _MAX_FAILED_ATTEMPTS:
+            return False
+
+        # Confirm the most recent failure is still within the lockout duration
+        if recent_attempts and recent_attempts[0].attempted_at >= lockout_start:
+            return True
+
+        return False
 
     # ── TOTP 2FA ───────────────────────────────────────────────────────
 

@@ -170,6 +170,40 @@ API: `GET/PATCH /settings/global`, `/settings/tenants/{slug}`, `/settings/users/
 - **Error messages sanitized** — no internal details leaked to clients
 - **SMTP password write-only** — masked in GET responses, never in audit logs
 - **Security headers** — HSTS, CSP, X-Frame-Options, rate limiting via middleware
+- **Account lockout** — 5 consecutive failures in 15 min → 30-min lockout; tracked in `login_attempts` table; generic error message prevents user enumeration
+- **Session version** — `session_version` int on `User`; increment to force re-auth of all active tokens; JWT carries `sv` claim validated on every request
+- **Idle timeout** — JWT `iat` checked against `GlobalSettings.session_timeout_minutes` (default 15 min); token rejected even if `exp` hasn't elapsed
+- **PHI data access audit** — `AuditService.log_data_access()` helper; **modules handling sensitive data MUST call this on every read**; ItemsService is the canonical example
+
+## PHI / Sensitive Data Access Audit (REQUIRED for HIPAA modules)
+
+Any service method that reads PHI or other sensitive records **must** call:
+
+```python
+await self._audit.log_data_access(
+    user_id=ctx.user_id,
+    resource_type="<your_resource>",   # e.g. "patient", "record"
+    resource_id=str(resource.id),      # or "list" for bulk reads
+    action="view",                     # or "list", "export", etc.
+    tenant_id=tenant_id,
+    ip_address=ctx.ip_address,
+)
+```
+
+This produces an immutable audit trail entry with `action = "<resource_type>.<action>"`.
+Do NOT skip this call for GET and list endpoints on sensitive tables.
+
+## Data Retention
+
+`GET /api/v1/tenants/{slug}/retention/report` returns items older than the configured
+retention window.  Resolution order:
+
+1. `TenantSettings.retention_days` (explicit per-tenant)
+2. `TenantSettings.retention_days_override` (legacy per-tenant field)
+3. `GlobalSettings.retention_days_default` (default: 90 days)
+
+The endpoint is **read-only** — it never auto-deletes.  Wire up a scheduled task or
+admin action to act on the report.
 
 ## Service Registry (Dependency Injection)
 

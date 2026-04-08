@@ -151,6 +151,9 @@ class UsersService:
                 changes["display_name"] = data.display_name
             if data.is_active is not None:
                 changes["is_active"] = data.is_active
+                # Deactivating a user invalidates all their active JWT tokens.
+                if not data.is_active:
+                    changes["session_version"] = (user_obj.session_version or 0) + 1
             if changes:
                 await repo.update(user_obj, **changes)
 
@@ -271,7 +274,9 @@ class UsersService:
                 from app.core.exceptions import AuthenticationError
                 raise AuthenticationError("Current password is incorrect")
             new_hash = AuthService.hash_password(new_password)
-            await repo.update(user_obj, password_hash=new_hash)
+            # Increment session_version to invalidate all previously issued tokens.
+            new_session_version = (user_obj.session_version or 0) + 1
+            await repo.update(user_obj, password_hash=new_hash, session_version=new_session_version)
             await session.commit()
             await self._audit.log(AuditLogCreate(
                 user_id=ctx.user_id,

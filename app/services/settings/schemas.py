@@ -32,6 +32,10 @@ class TenantSettings(BaseModel):
     """Per-tenant overrides, managed by tenant admins."""
 
     retention_days_override: int | None = Field(None, ge=1, le=3650)
+    # retention_days: explicit per-tenant data retention cap in days.
+    # When set, items older than this value are flagged by the retention report
+    # endpoint.  Falls back to GlobalSettings.retention_days_default when None.
+    retention_days: int | None = Field(None, ge=1, le=3650)
     notification_email: str | None = None
     custom_field_1: str | None = None
     custom_field_2: str | None = None

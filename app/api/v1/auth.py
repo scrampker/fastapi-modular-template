@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from app.core.auth import require_auth
 from app.core.dependencies import get_auth_service, get_users_service
 from app.core.exceptions import AuthenticationError
+from app.services.audit.schemas import AuditLogCreate
 from app.services.auth.schemas import (
     BackupCodesResponse,
     LoginRequest,
@@ -24,6 +25,8 @@ from app.services.users.service import UsersService
 
 router = APIRouter()
 
+_GENERIC_LOGIN_ERROR = "Invalid email or password"
+
 
 @router.post("/login", response_model=LoginResponse)
 async def login(
@@ -37,22 +40,51 @@ async def login(
     If the user has TOTP enabled a short-lived *partial token* is returned and
     ``requires_totp`` is set to ``True``.  The client must call
     ``POST /auth/totp/verify`` with that token to receive a full access token.
+
+    After 5 consecutive failures within 15 minutes the account is locked for
+    30 minutes.  A generic error message is returned regardless of the failure
+    reason to avoid revealing whether the email address exists.
     """
-    password_hash = await users.get_password_hash(body.email)
+    ip = request.client.host if request.client else "unknown"
+    email_lower = body.email.strip().lower()
+
+    # Check lockout before attempting credential verification
+    if await auth.check_lockout(email_lower):
+        # Record this blocked attempt so the lockout window stays fresh
+        await auth.record_login_attempt(email_lower, success=False, ip_address=ip)
+        raise AuthenticationError(_GENERIC_LOGIN_ERROR)
+
+    password_hash = await users.get_password_hash(email_lower)
     if not password_hash or not auth.verify_password(body.password, password_hash):
-        raise AuthenticationError("Invalid email or password")
+        await auth.record_login_attempt(email_lower, success=False, ip_address=ip)
+        raise AuthenticationError(_GENERIC_LOGIN_ERROR)
 
-    user = await users.get_by_email(body.email)
+    user = await users.get_by_email(email_lower)
     if not user or not user.is_active:
-        raise AuthenticationError("Invalid email or password")
+        await auth.record_login_attempt(email_lower, success=False, ip_address=ip)
+        raise AuthenticationError(_GENERIC_LOGIN_ERROR)
 
-    # Check whether the underlying ORM object has TOTP enabled
+    # Fetch ORM object for TOTP and session_version fields
     user_obj = await _get_user_orm(request, user.id)
+    session_version = getattr(user_obj, "session_version", 0) if user_obj else 0
+
+    await auth.record_login_attempt(email_lower, success=True, ip_address=ip)
+    await auth._audit.log(AuditLogCreate(
+        user_id=user.id,
+        action="auth.login",
+        target_type="user",
+        target_id=str(user.id),
+        detail={"email": email_lower},
+        ip_address=ip,
+    ))
+
     if user_obj is not None and getattr(user_obj, "totp_enabled", False):
-        partial_token = auth.create_access_token(user.id, totp_pending=True)
+        partial_token = auth.create_access_token(
+            user.id, totp_pending=True, session_version=session_version
+        )
         return LoginResponse(requires_totp=True, partial_token=partial_token)
 
-    access_token = auth.create_access_token(user.id)
+    access_token = auth.create_access_token(user.id, session_version=session_version)
     return LoginResponse(
         access_token=access_token,
         expires_in=auth._settings.jwt_access_token_expire_minutes * 60,

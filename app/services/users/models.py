@@ -29,6 +29,12 @@ class User(Base, TimestampMixin):
     # Password policy
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Session invalidation: increment to force re-auth of all active tokens.
+    # JWT tokens carry a `session_version` claim; if it's less than this value
+    # the token is rejected even if it hasn't expired.  Incremented when an
+    # admin deactivates the user or when the user's password is reset.
+    session_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
 
 class Role(Base):
     __tablename__ = "roles"

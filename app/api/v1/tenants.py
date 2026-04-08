@@ -7,10 +7,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 
 from app.core.auth import require_role, require_superadmin
-from app.core.dependencies import get_tenants_service
+from app.core.dependencies import get_items_service, get_settings_service, get_tenants_service
 from app.core.exceptions import ForbiddenError
 from app.core.schemas import PaginatedResponse, RoleName
 from app.services.auth.schemas import UserContext
+from app.services.items.schemas import ItemRetentionReport
+from app.services.items.service import ItemsService
+from app.services.settings.service import SettingsService
 from app.services.tenants.schemas import (
     ApiKeyResponse,
     TenantCreate,
@@ -107,3 +110,44 @@ async def deactivate_tenant(
     """Deactivate a tenant. Superadmin only."""
     tenant = await svc.get_by_slug(slug)
     await svc.deactivate(tenant.id)
+
+
+@router.get("/{slug}/retention/report", response_model=ItemRetentionReport)
+async def get_retention_report(
+    slug: str,
+    user: UserContext = Depends(require_role(RoleName.ADMIN)),
+    tenants_svc: TenantsService = Depends(get_tenants_service),
+    items_svc: ItemsService = Depends(get_items_service),
+    settings_svc: SettingsService = Depends(get_settings_service),
+) -> ItemRetentionReport:
+    """List items that would be affected by data-retention enforcement.
+
+    The retention window is resolved in priority order:
+    1. ``TenantSettings.retention_days`` — explicit per-tenant override.
+    2. ``TenantSettings.retention_days_override`` — legacy per-tenant field.
+    3. ``GlobalSettings.retention_days_default`` — platform default (90 days).
+
+    This endpoint is **read-only** — it never deletes anything.
+    Requires admin role for the tenant.
+    """
+    if not user.is_superadmin and slug not in user.tenant_roles:
+        raise ForbiddenError(f"No access to tenant '{slug}'")
+
+    tenant = await tenants_svc.get_by_slug(slug)
+
+    # Resolve retention days: tenant-specific → global default
+    retention_days: int = 90  # safe fallback
+    try:
+        tenant_cfg = await settings_svc.get_tenant(str(tenant.id))
+        if tenant_cfg and tenant_cfg.retention_days is not None:
+            retention_days = tenant_cfg.retention_days
+        elif tenant_cfg and tenant_cfg.retention_days_override is not None:
+            retention_days = tenant_cfg.retention_days_override
+        else:
+            global_cfg = await settings_svc.get_global()
+            if global_cfg and hasattr(global_cfg, "retention_days_default"):
+                retention_days = global_cfg.retention_days_default
+    except Exception:
+        pass  # Fall through to safe default
+
+    return await items_svc.check_retention(tenant.id, retention_days)

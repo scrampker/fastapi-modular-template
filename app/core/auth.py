@@ -11,11 +11,21 @@ Priority order:
 External identity providers (Cloudflare, Azure) auto-provision users on first
 login. Unknown emails get a "pending" role; the configured ADMIN_EMAIL is
 auto-promoted to superadmin.
+
+Session security:
+- JWT tokens carry a ``sv`` (session_version) claim.  If the value in the
+  token is less than the user's current ``session_version`` column value the
+  token is rejected — this enables instant forced re-auth when an admin
+  deactivates a user or resets a password.
+- The ``iat`` (issued-at) claim is checked against the ``session_timeout_minutes``
+  global setting.  Tokens older than the idle timeout are rejected even if
+  their ``exp`` hasn't been reached yet.
 """
 
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import Depends, Request
@@ -215,6 +225,12 @@ async def _resolve_jwt_user(registry, token: str) -> UserContext:
     Raises ``ForbiddenError`` if the token carries a ``totp_pending`` claim,
     meaning the user authenticated with password but has not yet completed
     TOTP verification.
+
+    Also enforces:
+    - ``session_version`` claim: token is rejected if its version is less than
+      the user's current ``session_version`` (forced re-auth path).
+    - Idle timeout: token's ``iat`` must be within ``session_timeout_minutes``
+      of now even if the JWT ``exp`` hasn't elapsed yet.
     """
     payload = registry.auth.decode_token(token)
     if payload.get("totp_pending"):
@@ -223,15 +239,45 @@ async def _resolve_jwt_user(registry, token: str) -> UserContext:
     if not user_id:
         raise AuthenticationError("Invalid token: no subject")
 
+    # ── Idle timeout check ────────────────────────────────────────────
+    iat = payload.get("iat")
+    if iat is not None:
+        try:
+            settings = get_settings()
+            # Resolve effective session_timeout from global settings store;
+            # fall back to the JWT expiry config if the settings store is unavailable.
+            timeout_minutes: int = settings.jwt_access_token_expire_minutes
+            try:
+                resolved_timeout = await registry.settings.resolve("session_timeout_minutes")
+                if resolved_timeout is not None:
+                    timeout_minutes = int(resolved_timeout)
+            except Exception:
+                pass
+
+            issued_at = datetime.fromtimestamp(iat, tz=timezone.utc)
+            if datetime.now(timezone.utc) - issued_at > timedelta(minutes=timeout_minutes):
+                raise AuthenticationError("Session expired — please log in again")
+        except AuthenticationError:
+            raise
+        except Exception:
+            pass  # Never let timeout check crash auth for malformed iat
+
     user_read = None
+    user_session_version = 0
     async with registry.users._session_factory() as session:
         from app.services.users.repository import UserRepository
         repo = UserRepository(session)
         user_obj = await repo.get_by_id(user_id)
         if not user_obj or not user_obj.is_active:
             raise AuthenticationError("User not found or inactive")
+        user_session_version = getattr(user_obj, "session_version", 0)
         from app.services.users.schemas import UserRead
         user_read = UserRead.model_validate(user_obj)
+
+    # ── Session version check ─────────────────────────────────────────
+    token_sv = payload.get("sv", 0)
+    if token_sv < user_session_version:
+        raise AuthenticationError("Session invalidated — please log in again")
 
     tenant_roles = await registry.users.get_user_tenant_roles(user_read.id)
     slug_roles: dict[str, RoleName] = {}

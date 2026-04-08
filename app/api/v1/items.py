@@ -21,6 +21,7 @@ router = APIRouter()
 @router.get("", response_model=PaginatedResponse[ItemRead])
 async def list_items(
     slug: str,
+    request: Request,
     search: str | None = None,
     is_active: bool | None = None,
     page: int = Query(default=1, ge=1),
@@ -31,8 +32,9 @@ async def list_items(
 ) -> PaginatedResponse[ItemRead]:
     """List items for a tenant."""
     tenant = await tenants_svc.get_by_slug(slug)
+    ctx = build_audit_ctx(user, request, tenant.id)
     filters = ItemFilter(search=search, is_active=is_active, page=page, per_page=per_page)
-    return await svc.list(tenant.id, filters)
+    return await svc.list(tenant.id, filters, ctx)
 
 
 @router.post("", response_model=ItemRead, status_code=201)
@@ -54,13 +56,15 @@ async def create_item(
 async def get_item(
     slug: str,
     item_id: UUID,
+    request: Request,
     user: UserContext = Depends(require_role(RoleName.VIEWER)),
     svc: ItemsService = Depends(get_items_service),
     tenants_svc: TenantsService = Depends(get_tenants_service),
 ) -> ItemRead:
     """Get a single item by ID."""
     tenant = await tenants_svc.get_by_slug(slug)
-    return await svc.get(item_id, tenant.id)
+    ctx = build_audit_ctx(user, request, tenant.id)
+    return await svc.get(item_id, tenant.id, ctx)
 
 
 @router.patch("/{item_id}", response_model=ItemRead)
