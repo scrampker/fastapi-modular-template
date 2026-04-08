@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <!-- Stat cards -->
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+
+    <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 card-enter">
+      <p class="text-xs text-slate-400 uppercase tracking-wider font-medium">Total Items</p>
+      <p id="stat-total-items" class="mt-1 text-2xl font-bold text-slate-100">—</p>
+    </div>
+
+    <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 card-enter">
+      <p class="text-xs text-slate-400 uppercase tracking-wider font-medium">Active Items</p>
+      <p id="stat-active-items" class="mt-1 text-2xl font-bold text-green-400">—</p>
+    </div>
+
+    <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 card-enter">
+      <p class="text-xs text-slate-400 uppercase tracking-wider font-medium">Users</p>
+      <p id="stat-users" class="mt-1 text-2xl font-bold text-slate-100">—</p>
+    </div>
+
+    <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 card-enter">
+      <p class="text-xs text-slate-400 uppercase tracking-wider font-medium">Tenant</p>
+      <p class="mt-1 text-lg font-bold text-blue-400 truncate">{{ slug }}</p>
+    </div>
+
+  </div>
+
+  <!-- Configure prompt — shown until widgets are configured -->
+  <div id="configure-prompt"
+       class="hidden bg-slate-800/50 border border-dashed border-slate-700 rounded-xl px-8 py-12 text-center">
+    <svg class="mx-auto w-10 h-10 text-slate-600 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"/>
+    </svg>
+    <h3 class="text-sm font-semibold text-slate-400 mb-1">Configure your dashboard</h3>
+    <p class="text-xs text-slate-500 max-w-xs mx-auto">
+      Add widgets to this dashboard to surface the metrics that matter to your team.
+    </p>
+  </div>
+
+  <!-- Recent items panel -->
+  <div class="bg-slate-800 border border-slate-700 rounded-xl">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-700">
+      <h2 class="text-sm font-semibold text-slate-200">Recent Items</h2>
+      <a href="/c/{{ slug }}/items"
+         class="text-xs text-blue-400 hover:text-blue-300 transition-colors">View all &rarr;</a>
+    </div>
+    <div id="recent-items-list" class="divide-y divide-slate-700/50">
+      <div class="px-5 py-4 text-sm text-slate-500 animate-pulse">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Widget placeholder grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+    <div class="bg-slate-800 border border-dashed border-slate-700 rounded-xl p-6 flex flex-col items-center
+                justify-center min-h-[160px] text-center">
+      <svg class="w-8 h-8 text-slate-700 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+      </svg>
+      <p class="text-xs text-slate-600">Chart widget placeholder</p>
+    </div>
+
+    <div class="bg-slate-800 border border-dashed border-slate-700 rounded-xl p-6 flex flex-col items-center
+                justify-center min-h-[160px] text-center">
+      <svg class="w-8 h-8 text-slate-700 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+      </svg>
+      <p class="text-xs text-slate-600">Activity widget placeholder</p>
+    </div>
+
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(async function loadDashboard() {
+  const slug = {{ slug | tojson }};
+  const headers = Auth.getHeaders();
+
+  // Load items summary
+  try {
+    const res = await fetch(`/api/v1/tenants/${slug}/items?per_page=5`, { headers });
+    if (res.ok) {
+      const data = await res.json();
+
+      const total = data.total ?? 0;
+      document.getElementById('stat-total-items').textContent = total || '—';
+
+      const active = (data.items || []).filter(i => i.status === 'active').length;
+      document.getElementById('stat-active-items').textContent = active || '—';
+
+      const list = document.getElementById('recent-items-list');
+      if (!data.items || data.items.length === 0) {
+        list.innerHTML = '<div class="px-5 py-4 text-sm text-slate-500">No items yet.</div>';
+        document.getElementById('configure-prompt').classList.remove('hidden');
+      } else {
+        list.innerHTML = data.items.map(item => `
+          <div class="flex items-center justify-between px-5 py-3 hover:bg-slate-700/30 transition-colors">
+            <div>
+              <p class="text-sm font-medium text-slate-200">${escapeHtml(item.name)}</p>
+              ${item.description
+                ? `<p class="text-xs text-slate-500 truncate max-w-xs">${escapeHtml(item.description)}</p>`
+                : ''}
+            </div>
+            <div class="flex items-center gap-3 flex-shrink-0 ml-4">
+              <span class="text-xs px-2 py-0.5 rounded-full border
+                ${item.active
+                  ? 'bg-green-900/40 border-green-700 text-green-300'
+                  : 'bg-slate-700 border-slate-600 text-slate-400'}">
+                ${item.active ? 'Active' : 'Inactive'}
+              </span>
+              <span class="text-xs text-slate-500">${timeAgo(item.created_at)}</span>
+            </div>
+          </div>`).join('');
+      }
+    }
+  } catch (_) {}
+
+  // Load user count
+  try {
+    const res = await fetch(`/api/v1/tenants/${slug}/users?per_page=1`, { headers });
+    if (res.ok) {
+      const data = await res.json();
+      document.getElementById('stat-users').textContent = data.total ?? '—';
+    }
+  } catch (_) {}
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+
+{% block title %}Tenant Settings{% endblock %}
+{% block page_title %}Tenant Settings{% endblock %}
+
+{% block breadcrumb %}
+<p class="text-xs text-slate-500 mt-0.5">{{ slug }}</p>
+{% endblock %}
+
+{% block content %}
+<div x-data="tenantSettings('{{ slug }}')" class="flex gap-6">
+
+  <!-- Left-rail nav -->
+  <aside class="w-44 flex-shrink-0">
+    <nav class="space-y-0.5">
+      <template x-for="section in sections" :key="section.id">
+        <button @click="activeSection = section.id"
+                :class="activeSection === section.id
+                  ? 'bg-slate-700 text-white'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                class="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-sm
+                       font-medium transition-colors">
+          <span x-text="section.label"></span>
+        </button>
+      </template>
+    </nav>
+  </aside>
+
+  <!-- Content -->
+  <div class="flex-1 min-w-0 max-w-2xl space-y-6">
+
+    <!-- ── General ───────────────────────────────────────────────────────── -->
+    <div x-show="activeSection === 'general'">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">General</h2>
+
+        <!-- Loading -->
+        <template x-if="loading">
+          <div class="space-y-4 animate-pulse">
+            <div class="h-4 bg-slate-700 rounded w-48"></div>
+            <div class="h-8 bg-slate-700 rounded w-full"></div>
+          </div>
+        </template>
+
+        <template x-if="!loading">
+          <div class="space-y-5">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1.5">Display name</label>
+              <input type="text" x-model="general.display_name"
+                     class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600
+                            text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1.5">Slug (read-only)</label>
+              <input type="text" :value="slug" disabled
+                     class="w-full px-3 py-2 rounded-lg bg-slate-900/50 border border-slate-700
+                            text-slate-500 text-sm font-mono cursor-not-allowed" />
+            </div>
+          </div>
+        </template>
+
+        <div class="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
+          <span x-show="msgs.general" class="text-sm"
+                :class="msgs.general_ok ? 'text-green-400' : 'text-red-400'"
+                x-text="msgs.general"></span>
+          <button @click="save('general')" :disabled="saving.general || loading"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                         text-white transition-colors disabled:opacity-50">
+            <span x-show="!saving.general">Save</span>
+            <span x-show="saving.general" class="animate-pulse">Saving...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Data Retention ────────────────────────────────────────────────── -->
+    <div x-show="activeSection === 'retention'">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">Data Retention</h2>
+
+        <div class="space-y-5">
+          <div class="p-3 rounded-lg bg-slate-900/60 border border-slate-700 text-xs text-slate-500">
+            Global default retention is set by platform admins. You can reduce it for this tenant
+            but not extend it beyond the global limit.
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">
+              Audit log retention (days)
+            </label>
+            <input type="number" x-model.number="retention.audit_log_days"
+                   min="7" max="3650"
+                   class="w-32 px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">
+              Item history retention (days)
+            </label>
+            <input type="number" x-model.number="retention.item_history_days"
+                   min="7" max="3650"
+                   class="w-32 px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
+          <span x-show="msgs.retention" class="text-sm"
+                :class="msgs.retention_ok ? 'text-green-400' : 'text-red-400'"
+                x-text="msgs.retention"></span>
+          <button @click="save('retention')" :disabled="saving.retention"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                         text-white transition-colors disabled:opacity-50">
+            <span x-show="!saving.retention">Save</span>
+            <span x-show="saving.retention" class="animate-pulse">Saving...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Notifications ─────────────────────────────────────────────────── -->
+    <div x-show="activeSection === 'notifications'">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">Notifications</h2>
+
+        <div class="space-y-5">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">
+              Notification email
+            </label>
+            <input type="email" x-model="notifications.email"
+                   placeholder="alerts@example.com"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <p class="text-xs text-slate-500 mt-1">
+              System notifications for this tenant are sent here.
+            </p>
+          </div>
+
+          <div class="border-t border-slate-700 pt-5">
+            <p class="text-xs font-medium text-slate-400 mb-3">Notification triggers</p>
+            <div class="space-y-3">
+              <template x-for="trigger in notifications.triggers" :key="trigger.key">
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <input type="checkbox" x-model="trigger.enabled"
+                         class="w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-600
+                                focus:ring-blue-500 focus:ring-offset-slate-800" />
+                  <span class="text-sm text-slate-300" x-text="trigger.label"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
+          <span x-show="msgs.notifications" class="text-sm"
+                :class="msgs.notifications_ok ? 'text-green-400' : 'text-red-400'"
+                x-text="msgs.notifications"></span>
+          <button @click="save('notifications')" :disabled="saving.notifications"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                         text-white transition-colors disabled:opacity-50">
+            <span x-show="!saving.notifications">Save</span>
+            <span x-show="saving.notifications" class="animate-pulse">Saving...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Danger Zone ───────────────────────────────────────────────────── -->
+    <div x-show="activeSection === 'danger'">
+      <div class="bg-slate-800 border border-red-900/50 rounded-xl p-6">
+        <h2 class="text-sm font-semibold text-red-400 uppercase tracking-wider mb-5">Danger Zone</h2>
+
+        <div class="space-y-4">
+          <div class="flex items-center justify-between p-4 rounded-lg border border-red-900/50 bg-red-950/20">
+            <div>
+              <p class="text-sm font-medium text-slate-200">Delete this tenant</p>
+              <p class="text-xs text-slate-500 mt-0.5">
+                Permanently removes all tenant data. This cannot be undone.
+              </p>
+            </div>
+            <button @click="confirmDeleteTenant = true"
+                    class="px-3 py-1.5 rounded-lg text-sm bg-red-700 hover:bg-red-600 text-white
+                           font-medium transition-colors">
+              Delete tenant
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Delete confirmation dialog -->
+      <template x-if="confirmDeleteTenant">
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div class="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-6 w-full max-w-sm">
+            <h3 class="text-base font-semibold text-red-400 mb-2">Delete tenant?</h3>
+            <p class="text-sm text-slate-400 mb-3">
+              This will permanently delete <strong x-text="slug" class="text-slate-200"></strong>
+              and all associated data.
+            </p>
+            <p class="text-xs text-slate-500 mb-4">
+              Type the tenant slug to confirm:
+            </p>
+            <input type="text" x-model="deleteConfirmText"
+                   :placeholder="slug"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-red-500" />
+            <div class="flex gap-3 justify-end">
+              <button @click="confirmDeleteTenant = false; deleteConfirmText = ''"
+                      class="px-4 py-2 rounded-lg text-sm border border-slate-600 text-slate-300
+                             hover:bg-slate-700 transition-colors">
+                Cancel
+              </button>
+              <button @click="deleteTenant()"
+                      :disabled="deleteConfirmText !== slug"
+                      class="px-4 py-2 rounded-lg text-sm font-medium bg-red-700 hover:bg-red-600
+                             text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                Delete permanently
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function tenantSettings(slug) {
+  return {
+    slug,
+    activeSection: 'general',
+    loading: true,
+    sections: [
+      { id: 'general',       label: 'General' },
+      { id: 'retention',     label: 'Retention' },
+      { id: 'notifications', label: 'Notifications' },
+      { id: 'danger',        label: 'Danger Zone' },
+    ],
+
+    general:       { display_name: '' },
+    retention:     { audit_log_days: 90, item_history_days: 365 },
+    notifications: {
+      email: '',
+      triggers: [
+        { key: 'user_added',    label: 'New user added',         enabled: true  },
+        { key: 'user_removed',  label: 'User removed',           enabled: true  },
+        { key: 'data_exported', label: 'Data export performed',  enabled: false },
+      ],
+    },
+
+    saving: { general: false, retention: false, notifications: false },
+    msgs:   { general: '', general_ok: false, retention: '', retention_ok: false,
+              notifications: '', notifications_ok: false },
+
+    confirmDeleteTenant: false,
+    deleteConfirmText: '',
+
+    async init() {
+      try {
+        const res = await fetch(`/api/v1/tenants/${slug}/settings`, {
+          headers: Auth.getHeaders(),
+        });
+        if (res.ok) {
+          const d = await res.json();
+          if (d.general)       this.general       = { ...this.general, ...d.general };
+          if (d.retention)     this.retention     = { ...this.retention, ...d.retention };
+          if (d.notifications) this.notifications = { ...this.notifications, ...d.notifications };
+        }
+      } catch (_) {}
+      this.loading = false;
+    },
+
+    async save(section) {
+      this.saving[section] = true;
+      this.msgs[section] = '';
+      try {
+        const res = await fetch(`/api/v1/tenants/${slug}/settings/${section}`, {
+          method: 'PUT',
+          headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(this[section]),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          this.msgs[section] = err.detail || 'Failed to save.';
+          this.msgs[section + '_ok'] = false;
+        } else {
+          this.msgs[section] = 'Saved.';
+          this.msgs[section + '_ok'] = true;
+          showToast('Settings saved.', 'success');
+        }
+      } catch (_) {
+        this.msgs[section] = 'Network error.';
+        this.msgs[section + '_ok'] = false;
+      } finally {
+        this.saving[section] = false;
+      }
+    },
+
+    async deleteTenant() {
+      if (this.deleteConfirmText !== this.slug) return;
+      try {
+        const res = await fetch(`/api/v1/tenants/${slug}`, {
+          method: 'DELETE',
+          headers: Auth.getHeaders(),
+        });
+        if (res.ok) {
+          showToast('Tenant deleted.', 'info');
+          window.location.href = '/admin/tenants';
+        } else {
+          showToast('Failed to delete tenant.', 'error');
+        }
+      } catch (_) {
+        showToast('Network error.', 'error');
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

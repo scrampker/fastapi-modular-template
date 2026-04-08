@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign In &mdash; {{ app_name }}</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+  <link rel="stylesheet" href="/static/css/main.css" />
+</head>
+<body class="h-full bg-slate-900 text-slate-100 font-sans antialiased flex items-center justify-center">
+
+<div class="w-full max-w-sm px-4" x-data="loginForm()">
+
+  <!-- Logo / brand -->
+  <div class="text-center mb-8">
+    <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-blue-600 mb-3">
+      <span class="text-white font-bold text-xl">{{ app_name[0] | upper if app_name else 'A' }}</span>
+    </div>
+    <h1 class="text-2xl font-bold text-slate-100">{{ app_name }}</h1>
+    <p class="text-sm text-slate-400 mt-1">Sign in to your account</p>
+  </div>
+
+  <!-- SSO option (conditional) -->
+  {% if sso_enabled %}
+  <div class="mb-6">
+    <a href="/auth/sso"
+       class="flex items-center justify-center gap-2 w-full py-2 px-4 rounded-md border border-slate-600
+              bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium transition-colors">
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+      </svg>
+      Continue with SSO
+    </a>
+    <div class="relative my-5">
+      <div class="absolute inset-0 flex items-center">
+        <div class="w-full border-t border-slate-700"></div>
+      </div>
+      <div class="relative flex justify-center text-xs">
+        <span class="px-2 bg-slate-900 text-slate-500">or sign in with password</span>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Login card -->
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-xl">
+    <form @submit.prevent="submit" novalidate>
+
+      <!-- Error banner -->
+      <div x-show="error" x-cloak
+           class="mb-4 px-3 py-2 rounded-md bg-red-900/50 border border-red-700 text-sm text-red-300"
+           x-text="error">
+      </div>
+
+      <!-- Email -->
+      <div class="mb-4">
+        <label for="email" class="block text-sm font-medium text-slate-300 mb-1.5">Email address</label>
+        <input id="email"
+               type="email"
+               x-model="email"
+               autocomplete="email"
+               required
+               placeholder="you@example.com"
+               class="w-full px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-slate-100
+                      placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500
+                      focus:border-transparent transition-colors" />
+      </div>
+
+      <!-- Password -->
+      <div class="mb-6">
+        <label for="password" class="block text-sm font-medium text-slate-300 mb-1.5">Password</label>
+        <input id="password"
+               type="password"
+               x-model="password"
+               autocomplete="current-password"
+               required
+               placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;"
+               class="w-full px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-slate-100
+                      placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500
+                      focus:border-transparent transition-colors" />
+      </div>
+
+      <!-- Submit -->
+      <button type="submit"
+              :disabled="loading"
+              class="w-full py-2 px-4 rounded-md bg-blue-600 hover:bg-blue-500 disabled:opacity-50
+                     disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors
+                     focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
+                     focus:ring-offset-slate-800">
+        <span x-show="!loading">Sign in</span>
+        <span x-show="loading" x-cloak class="flex items-center justify-center gap-2">
+          <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          </svg>
+          Signing in...
+        </span>
+      </button>
+
+    </form>
+  </div>
+
+  <!-- Footer note -->
+  <p class="mt-6 text-center text-xs text-slate-600">
+    {{ app_name }} &mdash; access is restricted to authorized users
+  </p>
+</div>
+
+<script>
+function loginForm() {
+  return {
+    email: '',
+    password: '',
+    loading: false,
+    error: '',
+
+    async submit() {
+      this.loading = true;
+      this.error = '';
+
+      try {
+        const res = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: this.email, password: this.password }),
+        });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          this.error = data.detail || 'Invalid email or password.';
+          return;
+        }
+
+        const data = await res.json();
+        localStorage.setItem('app_token', data.access_token);
+        localStorage.setItem('app_token_type', data.token_type || 'bearer');
+
+        // Redirect: follow server hint or fall back to default tenant dashboard
+        const next = new URLSearchParams(window.location.search).get('next');
+        window.location.href = next || '/c/default/dashboard';
+      } catch (_err) {
+        this.error = 'Network error. Please try again.';
+      } finally {
+        this.loading = false;
+      }
+    }
+  };
+}
+</script>
+
+</body>
+</html>

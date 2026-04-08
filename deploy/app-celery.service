@@ -1,0 +1,55 @@
+[Unit]
+Description=myapp Celery Worker
+Documentation=https://github.com/yourorg/myapp
+After=network.target redis.service
+Wants=network.target
+
+[Service]
+Type=forking
+User=myapp
+Group=myapp
+WorkingDirectory=/opt/myapp/app
+
+# Load environment from the production .env file
+EnvironmentFile=/opt/myapp/.env
+
+# PID file for forking service type
+PIDFile=/var/run/myapp-celery.pid
+
+ExecStart=/opt/myapp/venv/bin/celery \
+    --app app.core.celery_app:celery_app \
+    worker \
+    --loglevel=info \
+    --logfile=/var/log/myapp/celery.log \
+    --pidfile=/var/run/myapp-celery.pid \
+    --concurrency=4 \
+    --max-tasks-per-child=1000 \
+    --queues=default,priority
+
+ExecStop=/opt/myapp/venv/bin/celery \
+    --app app.core.celery_app:celery_app \
+    control shutdown
+
+ExecReload=/opt/myapp/venv/bin/celery \
+    --app app.core.celery_app:celery_app \
+    control pool_restart
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/myapp /var/log/myapp /tmp /var/run
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target

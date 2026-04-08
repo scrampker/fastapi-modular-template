@@ -1,0 +1,349 @@
+{% extends "base.html" %}
+
+{% block title %}Platform Settings{% endblock %}
+{% block page_title %}Platform Settings{% endblock %}
+
+{% block breadcrumb %}
+<p class="text-xs text-slate-500 mt-0.5">Global configuration</p>
+{% endblock %}
+
+{% block content %}
+<div x-data="adminSettings()" class="flex gap-6">
+
+  <!-- Left-rail nav -->
+  <aside class="w-44 flex-shrink-0">
+    <nav class="space-y-0.5">
+      <template x-for="section in sections" :key="section.id">
+        <button @click="activeSection = section.id"
+                :class="activeSection === section.id
+                  ? 'bg-slate-700 text-white'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                class="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-sm
+                       font-medium transition-colors">
+          <span x-text="section.label"></span>
+        </button>
+      </template>
+    </nav>
+  </aside>
+
+  <!-- Settings panel -->
+  <div class="flex-1 min-w-0 max-w-2xl space-y-6">
+
+    <!-- ── Platform / Auth Providers ───────────────────────────────────── -->
+    <div x-show="activeSection === 'platform'">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">Authentication Providers</h2>
+
+        <div class="space-y-4">
+          <!-- Local auth toggle -->
+          <div class="flex items-center justify-between py-3 border-b border-slate-700">
+            <div>
+              <p class="text-sm font-medium text-slate-200">Local password authentication</p>
+              <p class="text-xs text-slate-500 mt-0.5">Allow users to sign in with email and password.</p>
+            </div>
+            <button @click="platform.local_auth = !platform.local_auth"
+                    :class="platform.local_auth ? 'bg-blue-600' : 'bg-slate-600'"
+                    class="relative inline-flex h-5 w-9 rounded-full transition-colors focus:outline-none
+                           focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-800">
+              <span :class="platform.local_auth ? 'translate-x-4' : 'translate-x-0.5'"
+                    class="inline-block w-4 h-4 mt-0.5 rounded-full bg-white shadow transition-transform">
+              </span>
+            </button>
+          </div>
+
+          <!-- SSO toggle -->
+          <div class="flex items-center justify-between py-3 border-b border-slate-700">
+            <div>
+              <p class="text-sm font-medium text-slate-200">SSO / SAML / OIDC</p>
+              <p class="text-xs text-slate-500 mt-0.5">Enable external identity provider login.</p>
+            </div>
+            <button @click="platform.sso_enabled = !platform.sso_enabled"
+                    :class="platform.sso_enabled ? 'bg-blue-600' : 'bg-slate-600'"
+                    class="relative inline-flex h-5 w-9 rounded-full transition-colors focus:outline-none
+                           focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-800">
+              <span :class="platform.sso_enabled ? 'translate-x-4' : 'translate-x-0.5'"
+                    class="inline-block w-4 h-4 mt-0.5 rounded-full bg-white shadow transition-transform">
+              </span>
+            </button>
+          </div>
+
+          <!-- SSO URL (conditional) -->
+          <div x-show="platform.sso_enabled" class="pt-1 pl-1">
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">SSO endpoint URL</label>
+            <input type="url" x-model="platform.sso_url"
+                   placeholder="https://idp.example.com/saml/..."
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
+          <span x-show="msgs.platform" class="text-sm"
+                :class="msgs.platform_ok ? 'text-green-400' : 'text-red-400'"
+                x-text="msgs.platform"></span>
+          <button @click="save('platform')" :disabled="saving.platform"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                         text-white transition-colors disabled:opacity-50">
+            <span x-show="!saving.platform">Save</span>
+            <span x-show="saving.platform" class="animate-pulse">Saving...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Security ─────────────────────────────────────────────────────── -->
+    <div x-show="activeSection === 'security'">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">Security</h2>
+
+        <div class="space-y-5">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">
+              Session timeout (minutes)
+            </label>
+            <input type="number" x-model.number="security.session_timeout_minutes"
+                   min="5" max="10080"
+                   class="w-32 px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <p class="text-xs text-slate-500 mt-1">Idle sessions expire after this period (5 – 10080 min).</p>
+          </div>
+
+          <div class="border-t border-slate-700 pt-5">
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">
+              Minimum password length
+            </label>
+            <input type="number" x-model.number="security.min_password_length"
+                   min="8" max="128"
+                   class="w-24 px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+
+          <div class="border-t border-slate-700 pt-5">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-sm font-medium text-slate-200">Require MFA</p>
+                <p class="text-xs text-slate-500 mt-0.5">
+                  Prompt all users to enroll in multi-factor authentication.
+                </p>
+              </div>
+              <button @click="security.require_mfa = !security.require_mfa"
+                      :class="security.require_mfa ? 'bg-blue-600' : 'bg-slate-600'"
+                      class="relative inline-flex h-5 w-9 rounded-full transition-colors focus:outline-none
+                             focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-800">
+                <span :class="security.require_mfa ? 'translate-x-4' : 'translate-x-0.5'"
+                      class="inline-block w-4 h-4 mt-0.5 rounded-full bg-white shadow transition-transform">
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
+          <span x-show="msgs.security" class="text-sm"
+                :class="msgs.security_ok ? 'text-green-400' : 'text-red-400'"
+                x-text="msgs.security"></span>
+          <button @click="save('security')" :disabled="saving.security"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                         text-white transition-colors disabled:opacity-50">
+            <span x-show="!saving.security">Save</span>
+            <span x-show="saving.security" class="animate-pulse">Saving...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Branding ──────────────────────────────────────────────────────── -->
+    <div x-show="activeSection === 'branding'">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">Branding</h2>
+
+        <div class="space-y-5">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Application name</label>
+            <input type="text" x-model="branding.app_name"
+                   placeholder="{{ app_name }}"
+                   class="w-full max-w-sm px-3 py-2 rounded-lg bg-slate-900 border border-slate-600
+                          text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <p class="text-xs text-slate-500 mt-1">
+              Shown in the sidebar, browser tab, and emails.
+            </p>
+          </div>
+
+          <div class="border-t border-slate-700 pt-5">
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Support email</label>
+            <input type="email" x-model="branding.support_email"
+                   placeholder="support@example.com"
+                   class="w-full max-w-sm px-3 py-2 rounded-lg bg-slate-900 border border-slate-600
+                          text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
+          <span x-show="msgs.branding" class="text-sm"
+                :class="msgs.branding_ok ? 'text-green-400' : 'text-red-400'"
+                x-text="msgs.branding"></span>
+          <button @click="save('branding')" :disabled="saving.branding"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                         text-white transition-colors disabled:opacity-50">
+            <span x-show="!saving.branding">Save</span>
+            <span x-show="saving.branding" class="animate-pulse">Saving...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Communication ────────────────────────────────────────────────── -->
+    <div x-show="activeSection === 'communication'">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">SMTP / Email</h2>
+
+        <div class="space-y-5">
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1.5">SMTP host</label>
+              <input type="text" x-model="smtp.host"
+                     placeholder="smtp.example.com"
+                     class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                            text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1.5">Port</label>
+              <input type="number" x-model.number="smtp.port"
+                     placeholder="587"
+                     class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                            text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">SMTP username</label>
+            <input type="text" x-model="smtp.username"
+                   placeholder="noreply@example.com"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">SMTP password</label>
+            <input type="password" x-model="smtp.password"
+                   placeholder="Leave blank to keep current"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">From address</label>
+            <input type="email" x-model="smtp.from_address"
+                   placeholder="noreply@example.com"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100
+                          text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+
+          <div class="flex items-center justify-between pt-2 border-t border-slate-700">
+            <button @click="testSmtp()" :disabled="smtpTesting"
+                    class="px-4 py-2 rounded-lg text-sm bg-slate-700 hover:bg-slate-600 text-slate-300
+                           transition-colors disabled:opacity-50">
+              <span x-show="!smtpTesting">Send test email</span>
+              <span x-show="smtpTesting" class="animate-pulse">Sending...</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-3 mt-4 pt-4 border-t border-slate-700">
+          <span x-show="msgs.smtp" class="text-sm"
+                :class="msgs.smtp_ok ? 'text-green-400' : 'text-red-400'"
+                x-text="msgs.smtp"></span>
+          <button @click="save('smtp')" :disabled="saving.smtp"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                         text-white transition-colors disabled:opacity-50">
+            <span x-show="!saving.smtp">Save</span>
+            <span x-show="saving.smtp" class="animate-pulse">Saving...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function adminSettings() {
+  return {
+    activeSection: 'platform',
+    sections: [
+      { id: 'platform',      label: 'Platform' },
+      { id: 'security',      label: 'Security' },
+      { id: 'branding',      label: 'Branding' },
+      { id: 'communication', label: 'Communication' },
+    ],
+
+    platform: { local_auth: true, sso_enabled: false, sso_url: '' },
+    security: { session_timeout_minutes: 480, min_password_length: 12, require_mfa: false },
+    branding: { app_name: '', support_email: '' },
+    smtp: { host: '', port: 587, username: '', password: '', from_address: '' },
+
+    saving: { platform: false, security: false, branding: false, smtp: false },
+    msgs:   { platform: '', platform_ok: false, security: '', security_ok: false,
+              branding: '', branding_ok: false, smtp: '', smtp_ok: false },
+    smtpTesting: false,
+
+    async init() {
+      try {
+        const res = await fetch('/api/v1/admin/settings', { headers: Auth.getHeaders() });
+        if (res.ok) {
+          const d = await res.json();
+          if (d.platform)      this.platform = { ...this.platform, ...d.platform };
+          if (d.security)      this.security = { ...this.security, ...d.security };
+          if (d.branding)      this.branding = { ...this.branding, ...d.branding };
+          if (d.smtp)          this.smtp     = { ...this.smtp, ...d.smtp };
+        }
+      } catch (_) {}
+    },
+
+    async save(section) {
+      this.saving[section] = true;
+      this.msgs[section] = '';
+      const payload = { [section]: this[section] };
+      try {
+        const res = await fetch(`/api/v1/admin/settings/${section}`, {
+          method: 'PUT',
+          headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(this[section]),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          this.msgs[section] = err.detail || 'Failed to save settings.';
+          this.msgs[section + '_ok'] = false;
+        } else {
+          this.msgs[section] = 'Saved.';
+          this.msgs[section + '_ok'] = true;
+          showToast('Settings saved.', 'success');
+        }
+      } catch (_) {
+        this.msgs[section] = 'Network error.';
+        this.msgs[section + '_ok'] = false;
+      } finally {
+        this.saving[section] = false;
+      }
+    },
+
+    async testSmtp() {
+      this.smtpTesting = true;
+      try {
+        const res = await fetch('/api/v1/admin/settings/smtp/test', {
+          method: 'POST',
+          headers: Auth.getHeaders(),
+        });
+        showToast(res.ok ? 'Test email sent.' : 'SMTP test failed.', res.ok ? 'success' : 'error');
+      } catch (_) {
+        showToast('Network error.', 'error');
+      } finally {
+        this.smtpTesting = false;
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

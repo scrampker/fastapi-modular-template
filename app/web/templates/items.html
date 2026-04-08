@@ -1,0 +1,342 @@
+{% extends "base.html" %}
+
+{% block title %}Items{% endblock %}
+{% block page_title %}Items{% endblock %}
+
+{% block header_actions %}
+<button onclick="ItemsPage.openCreate()"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors">
+  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+  </svg>
+  New Item
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+
+  <!-- Filters row -->
+  <div class="flex flex-wrap items-center gap-3">
+    <input id="search-input"
+           type="text"
+           placeholder="Search items..."
+           oninput="ItemsPage.onSearch()"
+           class="px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 w-56" />
+    <select id="status-filter"
+            onchange="ItemsPage.load()"
+            class="px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="">All statuses</option>
+      <option value="active">Active</option>
+      <option value="inactive">Inactive</option>
+      <option value="archived">Archived</option>
+    </select>
+    <span id="result-count" class="text-xs text-slate-500 ml-auto"></span>
+  </div>
+
+  <!-- Table -->
+  <div class="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-slate-700 text-xs text-slate-400 uppercase tracking-wider">
+          <th class="text-left px-5 py-3 font-medium">Name</th>
+          <th class="text-left px-5 py-3 font-medium hidden md:table-cell">Description</th>
+          <th class="text-left px-5 py-3 font-medium">Status</th>
+          <th class="text-left px-5 py-3 font-medium hidden lg:table-cell">Created</th>
+          <th class="px-5 py-3"></th>
+        </tr>
+      </thead>
+      <tbody id="items-tbody">
+        <tr>
+          <td colspan="5" class="px-5 py-8 text-center text-sm text-slate-500 animate-pulse">Loading...</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Pagination -->
+  <div class="flex items-center justify-between text-sm">
+    <button id="prev-btn" onclick="ItemsPage.prevPage()"
+            class="px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            disabled>
+      &larr; Previous
+    </button>
+    <span id="page-info" class="text-xs text-slate-500"></span>
+    <button id="next-btn" onclick="ItemsPage.nextPage()"
+            class="px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            disabled>
+      Next &rarr;
+    </button>
+  </div>
+
+</div>
+
+<!-- Create / Edit modal -->
+<div id="item-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/60" onclick="ItemsPage.closeModal()"></div>
+  <div class="relative bg-slate-800 border border-slate-700 rounded-xl shadow-2xl w-full max-w-md">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-700">
+      <h3 id="modal-title" class="text-sm font-semibold text-slate-200">New Item</h3>
+      <button onclick="ItemsPage.closeModal()" class="text-slate-400 hover:text-slate-200 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <form id="item-form" onsubmit="ItemsPage.submit(event)" class="px-5 py-4 space-y-4">
+      <input type="hidden" id="item-id" />
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">Name <span class="text-red-400">*</span></label>
+        <input id="item-name" type="text" required
+               class="w-full px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-slate-100 text-sm
+                      focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">Description</label>
+        <textarea id="item-description" rows="3"
+                  class="w-full px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-slate-100 text-sm
+                         focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"></textarea>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">Status</label>
+        <select id="item-status"
+                class="w-full px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-slate-100 text-sm
+                       focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+          <option value="active">Active</option>
+          <option value="inactive">Inactive</option>
+          <option value="archived">Archived</option>
+        </select>
+      </div>
+
+      <div id="form-error" class="hidden px-3 py-2 rounded-md bg-red-900/50 border border-red-700 text-sm text-red-300"></div>
+
+      <div class="flex justify-end gap-3 pt-2">
+        <button type="button" onclick="ItemsPage.closeModal()"
+                class="px-4 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-sm text-slate-200 transition-colors">
+          Cancel
+        </button>
+        <button type="submit" id="submit-btn"
+                class="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-sm text-white font-medium transition-colors disabled:opacity-50">
+          Save
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div id="delete-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/60" onclick="ItemsPage.closeDelete()"></div>
+  <div class="relative bg-slate-800 border border-slate-700 rounded-xl shadow-2xl w-full max-w-sm p-6 text-center">
+    <svg class="w-10 h-10 mx-auto text-red-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>
+    </svg>
+    <h3 class="text-sm font-semibold text-slate-200 mb-1">Delete Item</h3>
+    <p class="text-sm text-slate-400 mb-5">Are you sure you want to delete <span id="delete-item-name" class="font-medium text-slate-200"></span>? This cannot be undone.</p>
+    <div class="flex gap-3">
+      <button onclick="ItemsPage.closeDelete()"
+              class="flex-1 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-sm text-slate-200 transition-colors">
+        Cancel
+      </button>
+      <button onclick="ItemsPage.confirmDelete()"
+              class="flex-1 py-2 rounded-md bg-red-600 hover:bg-red-500 text-sm text-white font-medium transition-colors">
+        Delete
+      </button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const ItemsPage = (() => {
+  const SLUG = {{ slug | tojson }};
+  const PER_PAGE = 20;
+  let _page = 1;
+  let _total = 0;
+  let _searchTimer = null;
+  let _deleteId = null;
+
+  function baseUrl() {
+    return `/api/v1/tenants/${SLUG}/items`;
+  }
+
+  function statusBadge(status) {
+    const map = {
+      active:   'bg-green-900/40 border-green-700 text-green-300',
+      inactive: 'bg-yellow-900/40 border-yellow-700 text-yellow-300',
+      archived: 'bg-slate-700 border-slate-600 text-slate-400',
+    };
+    const cls = map[status] || map.archived;
+    return `<span class="text-xs px-2 py-0.5 rounded-full border ${cls}">${escapeHtml(status)}</span>`;
+  }
+
+  async function load() {
+    const tbody = document.getElementById('items-tbody');
+    tbody.innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-sm text-slate-500 animate-pulse">Loading...</td></tr>';
+
+    const q = document.getElementById('search-input').value.trim();
+    const status = document.getElementById('status-filter').value;
+
+    const params = new URLSearchParams({ page: _page, per_page: PER_PAGE });
+    if (q) params.set('q', q);
+    if (status) params.set('status', status);
+
+    try {
+      const res = await fetch(`${baseUrl()}?${params}`, { headers: Auth.getHeaders() });
+      if (res.status === 401 || res.status === 403) { Auth.logout(); return; }
+      if (!res.ok) { throw new Error('fetch failed'); }
+
+      const data = await res.json();
+      _total = data.total || 0;
+      const items = data.items || [];
+
+      document.getElementById('result-count').textContent =
+        _total === 0 ? 'No results' : `${_total} item${_total !== 1 ? 's' : ''}`;
+
+      if (items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-sm text-slate-500">No items found.</td></tr>';
+      } else {
+        tbody.innerHTML = items.map(item => `
+          <tr class="border-b border-slate-700/50 table-row-hover">
+            <td class="px-5 py-3 font-medium text-slate-200">${escapeHtml(item.name)}</td>
+            <td class="px-5 py-3 text-slate-400 hidden md:table-cell max-w-xs truncate">${escapeHtml(item.description || '')}</td>
+            <td class="px-5 py-3">${statusBadge(item.status)}</td>
+            <td class="px-5 py-3 text-slate-500 text-xs hidden lg:table-cell">${timeAgo(item.created_at)}</td>
+            <td class="px-5 py-3 text-right">
+              <button onclick="ItemsPage.openEdit(${JSON.stringify(item).replace(/"/g, '&quot;')})"
+                      class="text-xs text-blue-400 hover:text-blue-300 mr-3 transition-colors">Edit</button>
+              <button onclick="ItemsPage.openDelete('${item.id}', '${escapeHtml(item.name)}')"
+                      class="text-xs text-red-400 hover:text-red-300 transition-colors">Delete</button>
+            </td>
+          </tr>`).join('');
+      }
+
+      // Pagination
+      const totalPages = Math.ceil(_total / PER_PAGE);
+      document.getElementById('page-info').textContent =
+        _total > 0 ? `Page ${_page} of ${totalPages}` : '';
+      document.getElementById('prev-btn').disabled = _page <= 1;
+      document.getElementById('next-btn').disabled = _page >= totalPages;
+
+    } catch (err) {
+      tbody.innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-sm text-red-400">Failed to load items.</td></tr>';
+    }
+  }
+
+  function onSearch() {
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(() => { _page = 1; load(); }, 300);
+  }
+
+  function prevPage() { if (_page > 1) { _page--; load(); } }
+  function nextPage() { _page++; load(); }
+
+  function openCreate() {
+    document.getElementById('modal-title').textContent = 'New Item';
+    document.getElementById('item-id').value = '';
+    document.getElementById('item-name').value = '';
+    document.getElementById('item-description').value = '';
+    document.getElementById('item-status').value = 'active';
+    document.getElementById('form-error').classList.add('hidden');
+    document.getElementById('item-modal').classList.remove('hidden');
+    setTimeout(() => document.getElementById('item-name').focus(), 50);
+  }
+
+  function openEdit(item) {
+    document.getElementById('modal-title').textContent = 'Edit Item';
+    document.getElementById('item-id').value = item.id;
+    document.getElementById('item-name').value = item.name;
+    document.getElementById('item-description').value = item.description || '';
+    document.getElementById('item-status').value = item.status;
+    document.getElementById('form-error').classList.add('hidden');
+    document.getElementById('item-modal').classList.remove('hidden');
+    setTimeout(() => document.getElementById('item-name').focus(), 50);
+  }
+
+  function closeModal() {
+    document.getElementById('item-modal').classList.add('hidden');
+  }
+
+  async function submit(e) {
+    e.preventDefault();
+    const btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+
+    const id = document.getElementById('item-id').value;
+    const body = {
+      name: document.getElementById('item-name').value.trim(),
+      description: document.getElementById('item-description').value.trim() || null,
+      status: document.getElementById('item-status').value,
+    };
+
+    const errEl = document.getElementById('form-error');
+    errEl.classList.add('hidden');
+
+    try {
+      const url = id ? `${baseUrl()}/${id}` : baseUrl();
+      const method = id ? 'PATCH' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        errEl.textContent = data.detail || 'Failed to save item.';
+        errEl.classList.remove('hidden');
+        return;
+      }
+
+      closeModal();
+      showToast(id ? 'Item updated.' : 'Item created.', 'success');
+      load();
+    } catch (_) {
+      errEl.textContent = 'Network error. Please try again.';
+      errEl.classList.remove('hidden');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function openDelete(id, name) {
+    _deleteId = id;
+    document.getElementById('delete-item-name').textContent = name;
+    document.getElementById('delete-modal').classList.remove('hidden');
+  }
+
+  function closeDelete() {
+    _deleteId = null;
+    document.getElementById('delete-modal').classList.add('hidden');
+  }
+
+  async function confirmDelete() {
+    if (!_deleteId) return;
+    try {
+      const res = await fetch(`${baseUrl()}/${_deleteId}`, {
+        method: 'DELETE',
+        headers: Auth.getHeaders(),
+      });
+      if (!res.ok) {
+        showToast('Failed to delete item.', 'error');
+        return;
+      }
+      closeDelete();
+      showToast('Item deleted.', 'success');
+      load();
+    } catch (_) {
+      showToast('Network error.', 'error');
+    }
+  }
+
+  // Initial load
+  load();
+
+  return { load, onSearch, prevPage, nextPage, openCreate, openEdit, closeModal, submit, openDelete, closeDelete, confirmDelete };
+})();
+</script>
+{% endblock %}

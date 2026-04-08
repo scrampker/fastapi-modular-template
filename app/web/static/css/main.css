@@ -1,0 +1,72 @@
+/* MyApp — custom styles to complement Tailwind */
+
+/* ── Base resets ──────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+/* ── HTMX loading indicator ───────────────────────────────────────────── */
+.htmx-request .htmx-indicator { display: inline-block !important; }
+.htmx-indicator { display: none; }
+
+/* Request indicator: subtle top progress bar */
+#htmx-indicator {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  z-index: 9999;
+  display: none;
+  animation: htmx-progress 1.5s ease-in-out infinite;
+}
+
+@keyframes htmx-progress {
+  0%   { transform: scaleX(0); transform-origin: left; }
+  50%  { transform: scaleX(0.6); transform-origin: left; }
+  100% { transform: scaleX(1); transform-origin: left; opacity: 0; }
+}
+
+/* ── Scrollbars ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+/* ── Chart canvas containers ──────────────────────────────────────────── */
+canvas {
+  max-width: 100%;
+}
+
+/* ── Smooth transitions for Alpine x-show ─────────────────────────────── */
+[x-cloak] { display: none !important; }
+
+/* ── Table row hover ──────────────────────────────────────────────────── */
+.table-row-hover:hover { background: rgba(255,255,255,.02); }
+
+/* ── Focus ring normalization ─────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+/* ── Card entrance animation ──────────────────────────────────────────── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.card-enter {
+  animation: fadeInUp 0.25s ease-out both;
+}
+
+/* ── Monospace text ───────────────────────────────────────────────────── */
+.font-mono { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Menlo', monospace; }
+
+/* ── Loading pulse override (slightly brighter for dark bg) ───────────── */
+.animate-pulse {
+  animation: pulse 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .45; }
+}

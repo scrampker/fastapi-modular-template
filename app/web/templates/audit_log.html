@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+
+{% block title %}Audit Log{% endblock %}
+{% block page_title %}Audit Log{% endblock %}
+
+{% block breadcrumb %}
+<p class="text-xs text-slate-500 mt-0.5">{{ slug }}</p>
+{% endblock %}
+
+{% block content %}
+<div x-data="auditLog('{{ slug }}')" x-init="load()">
+
+  <!-- Filter bar -->
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
+    <div class="flex flex-wrap gap-3 items-center">
+
+      <!-- Search -->
+      <div class="relative flex-1 min-w-48">
+        <svg class="absolute left-3 top-2.5 w-4 h-4 text-slate-500 pointer-events-none"
+             fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+        </svg>
+        <input type="text" x-model="filters.q" @input.debounce.350ms="load()"
+               placeholder="Search events, users, targets..."
+               class="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-900 border border-slate-600
+                      text-slate-100 placeholder-slate-500 text-sm focus:outline-none
+                      focus:ring-2 focus:ring-blue-500" />
+      </div>
+
+      <!-- Action filter -->
+      <select x-model="filters.action" @change="load()"
+              class="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-200
+                     text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="">All actions</option>
+        <option value="create">Create</option>
+        <option value="update">Update</option>
+        <option value="delete">Delete</option>
+        <option value="login">Login</option>
+        <option value="logout">Logout</option>
+        <option value="export">Export</option>
+      </select>
+
+      <!-- Date range -->
+      <input type="date" x-model="filters.from_date" @change="load()"
+             class="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-200
+                    text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      <span class="text-slate-600 text-xs">to</span>
+      <input type="date" x-model="filters.to_date" @change="load()"
+             class="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-200
+                    text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+
+      <!-- Count -->
+      <span class="text-xs text-slate-500 ml-auto"
+            x-text="total !== null ? `${total.toLocaleString()} events` : ''">
+      </span>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+
+    <!-- Column headers -->
+    <div class="grid grid-cols-12 gap-2 px-5 py-2.5 border-b border-slate-700 text-xs font-medium
+                text-slate-500 uppercase tracking-wider">
+      <div class="col-span-2">Timestamp</div>
+      <div class="col-span-2">User</div>
+      <div class="col-span-2">Action</div>
+      <div class="col-span-3">Target</div>
+      <div class="col-span-2">IP address</div>
+      <div class="col-span-1"></div>
+    </div>
+
+    <!-- Loading skeleton -->
+    <template x-if="loading">
+      <div class="divide-y divide-slate-700/50">
+        <template x-for="i in 10" :key="i">
+          <div class="grid grid-cols-12 gap-2 px-5 py-3 animate-pulse">
+            <div class="col-span-2"><div class="h-4 bg-slate-700 rounded w-32"></div></div>
+            <div class="col-span-2"><div class="h-4 bg-slate-700 rounded w-28"></div></div>
+            <div class="col-span-2"><div class="h-5 bg-slate-700 rounded-full w-16"></div></div>
+            <div class="col-span-3"><div class="h-4 bg-slate-700 rounded w-40"></div></div>
+            <div class="col-span-2"><div class="h-4 bg-slate-700 rounded w-24"></div></div>
+            <div class="col-span-1"></div>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- Empty state -->
+    <template x-if="!loading && events.length === 0">
+      <div class="py-16 text-center">
+        <svg class="w-10 h-10 mx-auto text-slate-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+        </svg>
+        <p class="text-sm font-medium text-slate-400">No events found</p>
+        <p class="text-xs text-slate-500 mt-1">Try adjusting the date range or search terms.</p>
+      </div>
+    </template>
+
+    <!-- Data rows -->
+    <template x-if="!loading && events.length > 0">
+      <div class="divide-y divide-slate-700/30">
+        <template x-for="event in events" :key="event.id">
+          <div class="grid grid-cols-12 gap-2 px-5 py-3 hover:bg-slate-700/20 transition-colors
+                      items-start cursor-pointer"
+               @click="toggleDetail(event.id)">
+
+            <!-- Timestamp -->
+            <div class="col-span-2">
+              <p class="text-xs text-slate-300 font-mono" x-text="formatTs(event.timestamp)"></p>
+              <p class="text-xs text-slate-600" x-text="timeAgo(event.timestamp)"></p>
+            </div>
+
+            <!-- User -->
+            <div class="col-span-2 min-w-0">
+              <p class="text-sm text-slate-300 truncate" x-text="event.user_email || 'System'"></p>
+            </div>
+
+            <!-- Action badge -->
+            <div class="col-span-2">
+              <span class="text-xs px-2 py-0.5 rounded-full border font-medium"
+                    :class="actionBadge(event.action)"
+                    x-text="event.action">
+              </span>
+            </div>
+
+            <!-- Target -->
+            <div class="col-span-3 min-w-0">
+              <p class="text-sm text-slate-300 truncate" x-text="event.target || '—'"></p>
+              <p class="text-xs text-slate-600 truncate" x-text="event.target_id || ''"></p>
+            </div>
+
+            <!-- IP -->
+            <div class="col-span-2">
+              <p class="text-xs text-slate-400 font-mono" x-text="event.ip_address || '—'"></p>
+            </div>
+
+            <!-- Expand icon -->
+            <div class="col-span-1 flex justify-end">
+              <svg class="w-4 h-4 text-slate-500 transition-transform"
+                   :class="expandedId === event.id ? 'rotate-90' : ''"
+                   fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+              </svg>
+            </div>
+
+            <!-- Expanded detail (full-width row below) -->
+            <template x-if="expandedId === event.id">
+              <div class="col-span-12 mt-1 px-3 py-3 rounded-lg bg-slate-900/60 border border-slate-700
+                          text-xs text-slate-400 font-mono whitespace-pre-wrap break-all"
+                   x-text="event.detail || 'No additional detail.'">
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- Pagination footer -->
+    <div class="flex items-center justify-between px-5 py-3 border-t border-slate-700">
+      <span class="text-xs text-slate-500"
+            x-text="total ? `Page ${page} of ${Math.max(1, Math.ceil(total / perPage))}` : ''">
+      </span>
+      <div class="flex gap-2">
+        <button @click="page--; load()" :disabled="page <= 1"
+                class="px-2.5 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300
+                       disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+          Previous
+        </button>
+        <button @click="page++; load()" :disabled="page * perPage >= total"
+                class="px-2.5 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300
+                       disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+          Next
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function auditLog(slug) {
+  return {
+    slug,
+    events: [],
+    total: null,
+    loading: true,
+    page: 1,
+    perPage: 50,
+    expandedId: null,
+    filters: {
+      q: '',
+      action: '',
+      from_date: '',
+      to_date: '',
+    },
+
+    async load() {
+      this.loading = true;
+      this.expandedId = null;
+      try {
+        const params = new URLSearchParams({ page: this.page, per_page: this.perPage });
+        if (this.filters.q)         params.set('q',         this.filters.q);
+        if (this.filters.action)    params.set('action',    this.filters.action);
+        if (this.filters.from_date) params.set('from_date', this.filters.from_date);
+        if (this.filters.to_date)   params.set('to_date',   this.filters.to_date);
+
+        const base = slug
+          ? `/api/v1/tenants/${slug}/audit-log`
+          : '/api/v1/admin/audit-log';
+
+        const res = await fetch(`${base}?${params}`, { headers: Auth.getHeaders() });
+        if (!res.ok) { this.events = []; return; }
+        const data = await res.json();
+        this.events = data.items || data.events || [];
+        this.total  = data.total ?? this.events.length;
+      } catch (_) {
+        this.events = [];
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    toggleDetail(id) {
+      this.expandedId = this.expandedId === id ? null : id;
+    },
+
+    actionBadge(action) {
+      const map = {
+        create: 'bg-green-900/40 border-green-700 text-green-300',
+        update: 'bg-blue-900/40 border-blue-700 text-blue-300',
+        delete: 'bg-red-900/40 border-red-700 text-red-300',
+        login:  'bg-slate-700 border-slate-600 text-slate-300',
+        logout: 'bg-slate-700 border-slate-600 text-slate-400',
+        export: 'bg-yellow-900/40 border-yellow-700 text-yellow-300',
+      };
+      return map[action?.toLowerCase()] || 'bg-slate-700 border-slate-600 text-slate-400';
+    },
+
+    formatTs(ts) {
+      if (!ts) return '—';
+      return new Date(ts).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+    },
+  };
+}
+</script>
+{% endblock %}

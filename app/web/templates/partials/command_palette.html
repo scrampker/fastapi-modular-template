@@ -1,0 +1,178 @@
+<!-- Command Palette (Ctrl+K / Cmd+K)
+     Alpine component registered in main.js as commandPalette()
+     Opened via window event 'open-command-palette' or the global keydown listener. -->
+
+<div id="command-palette"
+     x-data="commandPalette()"
+     @open-command-palette.window="toggle()"
+     @keydown.escape.window="close()"
+     x-show="open"
+     x-cloak
+     class="fixed inset-0 z-[9000] flex items-start justify-center pt-[15vh] px-4">
+
+  <!-- Backdrop -->
+  <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+       @click="close()">
+  </div>
+
+  <!-- Palette panel -->
+  <div class="relative w-full max-w-xl bg-slate-800 border border-slate-700 rounded-xl shadow-2xl
+              overflow-hidden"
+       @keydown.arrow-down.prevent="moveDown()"
+       @keydown.arrow-up.prevent="moveUp()"
+       @keydown.enter.prevent="navigate()">
+
+    <!-- Search box -->
+    <div class="flex items-center gap-3 px-4 py-3 border-b border-slate-700">
+      <svg class="w-4 h-4 text-slate-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+      </svg>
+      <input id="command-palette-input"
+             type="text"
+             x-model="query"
+             @input="search()"
+             placeholder="Search tenants, items, settings..."
+             autocomplete="off"
+             spellcheck="false"
+             class="flex-1 bg-transparent text-slate-100 placeholder-slate-500 text-sm
+                    focus:outline-none" />
+      <div x-show="loading" class="w-4 h-4 border-2 border-slate-500 border-t-blue-500
+                                    rounded-full animate-spin flex-shrink-0">
+      </div>
+      <kbd class="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono
+                  bg-slate-700 border border-slate-600 text-slate-400">
+        Esc
+      </kbd>
+    </div>
+
+    <!-- Results area -->
+    <div id="command-palette-results"
+         class="max-h-80 overflow-y-auto py-2">
+
+      <!-- Empty / hint state -->
+      <template x-if="!query.trim() && !loading">
+        <div class="px-4 py-8 text-center">
+          <p class="text-sm text-slate-500">Start typing to search&hellip;</p>
+          <div class="mt-4 flex justify-center gap-4 text-xs text-slate-600">
+            <span><kbd class="px-1.5 py-0.5 rounded bg-slate-700 border border-slate-600">&#8593; &#8595;</kbd> navigate</span>
+            <span><kbd class="px-1.5 py-0.5 rounded bg-slate-700 border border-slate-600">Enter</kbd> select</span>
+            <span><kbd class="px-1.5 py-0.5 rounded bg-slate-700 border border-slate-600">Esc</kbd> close</span>
+          </div>
+        </div>
+      </template>
+
+      <!-- No results -->
+      <template x-if="query.trim() && !loading && !hasResults">
+        <div class="px-4 py-8 text-center">
+          <p class="text-sm text-slate-500">No results for
+            <span class="text-slate-300 font-medium" x-text="`&quot;${query}&quot;`"></span>
+          </p>
+        </div>
+      </template>
+
+      <!-- Grouped results -->
+      <template x-if="hasResults">
+        <div>
+
+          <!-- Tenants group -->
+          <template x-if="results.tenants && results.tenants.length > 0">
+            <div>
+              <div class="px-4 pt-2 pb-1">
+                <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Tenants</p>
+              </div>
+              <template x-for="item in results.tenants" :key="item.url">
+                <a :href="item.url"
+                   @click="close()"
+                   :data-selected="flatIndex(item) === selectedIndex ? '' : undefined"
+                   :class="flatIndex(item) === selectedIndex
+                     ? 'bg-blue-600/20 text-blue-200'
+                     : 'text-slate-300 hover:bg-slate-700'"
+                   class="flex items-center gap-3 px-4 py-2.5 transition-colors cursor-pointer">
+                  <svg class="w-4 h-4 text-slate-500 flex-shrink-0" fill="none" viewBox="0 0 24 24"
+                       stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5
+                             M9 7h1m-1 4h1m4-4h1m-1 4h1m-2 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+                  </svg>
+                  <div class="min-w-0">
+                    <p class="text-sm font-medium truncate" x-text="item.label"></p>
+                    <p x-show="item.sublabel" class="text-xs text-slate-500 truncate"
+                       x-text="item.sublabel"></p>
+                  </div>
+                </a>
+              </template>
+            </div>
+          </template>
+
+          <!-- Items group -->
+          <template x-if="results.items && results.items.length > 0">
+            <div>
+              <div class="px-4 pt-3 pb-1">
+                <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Items</p>
+              </div>
+              <template x-for="item in results.items" :key="item.url">
+                <a :href="item.url"
+                   @click="close()"
+                   :data-selected="flatIndex(item) === selectedIndex ? '' : undefined"
+                   :class="flatIndex(item) === selectedIndex
+                     ? 'bg-blue-600/20 text-blue-200'
+                     : 'text-slate-300 hover:bg-slate-700'"
+                   class="flex items-center gap-3 px-4 py-2.5 transition-colors cursor-pointer">
+                  <svg class="w-4 h-4 text-slate-500 flex-shrink-0" fill="none" viewBox="0 0 24 24"
+                       stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2
+                             M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                  </svg>
+                  <div class="min-w-0">
+                    <p class="text-sm font-medium truncate" x-text="item.label"></p>
+                    <p x-show="item.sublabel" class="text-xs text-slate-500 truncate"
+                       x-text="item.sublabel"></p>
+                  </div>
+                </a>
+              </template>
+            </div>
+          </template>
+
+          <!-- Settings group -->
+          <template x-if="results.settings && results.settings.length > 0">
+            <div>
+              <div class="px-4 pt-3 pb-1">
+                <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Settings</p>
+              </div>
+              <template x-for="item in results.settings" :key="item.url">
+                <a :href="item.url"
+                   @click="close()"
+                   :data-selected="flatIndex(item) === selectedIndex ? '' : undefined"
+                   :class="flatIndex(item) === selectedIndex
+                     ? 'bg-blue-600/20 text-blue-200'
+                     : 'text-slate-300 hover:bg-slate-700'"
+                   class="flex items-center gap-3 px-4 py-2.5 transition-colors cursor-pointer">
+                  <svg class="w-4 h-4 text-slate-500 flex-shrink-0" fill="none" viewBox="0 0 24 24"
+                       stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066
+                             c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756
+                             2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724
+                             1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0
+                             00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572
+                             c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826
+                             -3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                  </svg>
+                  <div class="min-w-0">
+                    <p class="text-sm font-medium truncate" x-text="item.label"></p>
+                    <p x-show="item.sublabel" class="text-xs text-slate-500 truncate"
+                       x-text="item.sublabel"></p>
+                  </div>
+                </a>
+              </template>
+            </div>
+          </template>
+
+        </div>
+      </template>
+    </div>
+
+  </div>
+</div>

@@ -1,0 +1,56 @@
+[Unit]
+Description=myapp Web Service (Gunicorn + Uvicorn workers)
+Documentation=https://github.com/yourorg/myapp
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+User=myapp
+Group=myapp
+WorkingDirectory=/opt/myapp/app
+
+# Load environment from the production .env file
+EnvironmentFile=/opt/myapp/.env
+
+# Activate the virtual environment and start Gunicorn with Uvicorn workers.
+# Adjust --workers to (2 * CPU cores) + 1 for production.
+ExecStart=/opt/myapp/venv/bin/gunicorn app.main:app \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --workers 4 \
+    --bind 127.0.0.1:8000 \
+    --timeout 120 \
+    --graceful-timeout 30 \
+    --keep-alive 5 \
+    --max-requests 1000 \
+    --max-requests-jitter 100 \
+    --log-level info \
+    --access-logfile /var/log/myapp/access.log \
+    --error-logfile /var/log/myapp/error.log
+
+ExecReload=/bin/kill -s HUP $MAINPID
+
+# Graceful shutdown
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/myapp /var/log/myapp /tmp
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target

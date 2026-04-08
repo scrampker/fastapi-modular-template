@@ -1,0 +1,446 @@
+{% extends "base.html" %}
+
+{% block title %}Users{% endblock %}
+
+{% block page_title %}Users{% endblock %}
+
+{% block breadcrumb %}
+<p class="text-xs text-slate-500 mt-0.5">{{ slug }}</p>
+{% endblock %}
+
+{% block header_actions %}
+<button @click="showAddModal = true"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-sm text-white transition-colors font-medium">
+  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+  </svg>
+  Add User
+</button>
+{% endblock %}
+
+{% block content %}
+<div x-data="usersPage('{{ slug }}')">
+
+  <!-- Filter Bar -->
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-5">
+    <div class="flex flex-wrap gap-3 items-center">
+
+      <!-- Search -->
+      <div class="flex-1 min-w-48">
+        <div class="relative">
+          <svg class="absolute left-3 top-2.5 w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          <input type="text" x-model="filters.search" @input.debounce.400ms="loadUsers()"
+                 placeholder="Search by email or name..."
+                 class="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100 placeholder-slate-500 text-sm
+                        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"/>
+        </div>
+      </div>
+
+      <!-- Active filter -->
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-slate-500">Show:</span>
+        <button @click="toggleActive(true)"
+                :class="filters.is_active === true ? 'bg-green-700 text-white border-green-600' : 'bg-slate-700 text-slate-300 border-slate-600 hover:bg-slate-600'"
+                class="px-2.5 py-1 rounded text-xs font-medium border transition-all">Active</button>
+        <button @click="toggleActive(false)"
+                :class="filters.is_active === false ? 'bg-slate-600 text-white border-slate-500' : 'bg-slate-700 text-slate-300 border-slate-600 hover:bg-slate-600'"
+                class="px-2.5 py-1 rounded text-xs font-medium border transition-all">Inactive</button>
+        <button @click="toggleActive(null)"
+                :class="filters.is_active === null ? 'bg-blue-700 text-white border-blue-600' : 'bg-slate-700 text-slate-300 border-slate-600 hover:bg-slate-600'"
+                class="px-2.5 py-1 rounded text-xs font-medium border transition-all">All</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results count + pagination -->
+  <div class="flex items-center justify-between mb-3">
+    <p class="text-sm text-slate-400">
+      <span x-show="!loading" x-text="total.toLocaleString() + ' user' + (total !== 1 ? 's' : '')"></span>
+      <span x-show="loading" class="animate-pulse">Loading...</span>
+    </p>
+    <div class="flex items-center gap-2 text-sm">
+      <button @click="prevPage()" :disabled="page <= 1"
+              class="px-2 py-1 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+        &lsaquo; Prev
+      </button>
+      <span class="text-slate-400 text-xs" x-text="`Page ${page} of ${Math.max(1, Math.ceil(total / perPage))}`"></span>
+      <button @click="nextPage()" :disabled="page >= Math.ceil(total / perPage)"
+              class="px-2 py-1 rounded border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+        Next &rsaquo;
+      </button>
+    </div>
+  </div>
+
+  <!-- Users Table -->
+  <div class="overflow-x-auto rounded-xl">
+  <div class="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden min-w-[640px]">
+
+    <!-- Table header -->
+    <div class="grid grid-cols-12 gap-2 px-4 py-2.5 border-b border-slate-700 text-xs font-medium text-slate-500 uppercase tracking-wider">
+      <div class="col-span-3">Email</div>
+      <div class="col-span-3">Display Name</div>
+      <div class="col-span-2">Role</div>
+      <div class="col-span-1">Active</div>
+      <div class="col-span-2">Last Login</div>
+      <div class="col-span-1 text-right">Actions</div>
+    </div>
+
+    <!-- Loading skeleton -->
+    <template x-if="loading">
+      <div class="divide-y divide-slate-700/50">
+        <template x-for="i in 8" :key="i">
+          <div class="grid grid-cols-12 gap-2 px-4 py-3 animate-pulse">
+            <div class="col-span-3"><div class="h-4 bg-slate-700 rounded w-48"></div></div>
+            <div class="col-span-3"><div class="h-4 bg-slate-700 rounded w-32"></div></div>
+            <div class="col-span-2"><div class="h-5 bg-slate-700 rounded w-16"></div></div>
+            <div class="col-span-1"><div class="h-4 bg-slate-700 rounded w-8"></div></div>
+            <div class="col-span-2"><div class="h-4 bg-slate-700 rounded w-24"></div></div>
+            <div class="col-span-1"><div class="h-5 bg-slate-700 rounded w-16 ml-auto"></div></div>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- Empty state -->
+    <template x-if="!loading && users.length === 0">
+      <div class="py-16 text-center">
+        <svg class="w-12 h-12 mx-auto text-slate-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
+        </svg>
+        <p class="text-slate-300 font-medium mb-1">No users found</p>
+        <p class="text-slate-500 text-sm">Add a user to get started.</p>
+      </div>
+    </template>
+
+    <!-- Data rows -->
+    <template x-if="!loading && users.length > 0">
+      <div class="divide-y divide-slate-700/50">
+        <template x-for="u in users" :key="u.id">
+          <div class="grid grid-cols-12 gap-2 px-4 py-3 hover:bg-slate-700/30 transition-colors items-center">
+
+            <!-- Email -->
+            <div class="col-span-3 font-mono text-sm text-slate-200 truncate" x-text="u.email"></div>
+
+            <!-- Display name -->
+            <div class="col-span-3 text-sm text-slate-300 truncate" x-text="u.display_name"></div>
+
+            <!-- Role (inline dropdown) -->
+            <div class="col-span-2">
+              <select x-model="u._pendingRole"
+                      @change="updateRole(u)"
+                      class="bg-slate-900 border border-slate-600 text-slate-200 text-xs rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors">
+                <option value="viewer">Viewer</option>
+                <option value="analyst">Analyst</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+
+            <!-- Active badge -->
+            <div class="col-span-1">
+              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium"
+                    :class="u.is_active ? 'bg-green-900/40 text-green-300 border border-green-800' : 'bg-slate-700 text-slate-500 border border-slate-600'"
+                    x-text="u.is_active ? 'Active' : 'Inactive'">
+              </span>
+            </div>
+
+            <!-- Last login -->
+            <div class="col-span-2 text-xs text-slate-500" x-text="u.last_login ? formatDate(u.last_login) : 'Never'"></div>
+
+            <!-- Actions -->
+            <div class="col-span-1 flex justify-end gap-1">
+              <button x-show="u.is_active"
+                      @click="confirmDeactivate(u)"
+                      title="Deactivate user"
+                      :aria-label="'Deactivate ' + u.email"
+                      class="p-1.5 rounded text-slate-500 hover:text-red-400 hover:bg-red-900/20 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/>
+                </svg>
+              </button>
+              <button x-show="!u.is_active"
+                      @click="reactivate(u)"
+                      title="Reactivate user"
+                      :aria-label="'Reactivate ' + u.email"
+                      class="p-1.5 rounded text-slate-500 hover:text-green-400 hover:bg-green-900/20 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                </svg>
+              </button>
+            </div>
+
+          </div>
+        </template>
+      </div>
+    </template>
+  </div>
+  </div><!-- /overflow-x-auto -->
+
+  <!-- Deactivate confirmation modal -->
+  <template x-if="confirmTarget">
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-6 w-full max-w-sm mx-4"
+           @click.outside="confirmTarget = null">
+        <h3 class="text-base font-semibold text-slate-100 mb-2">Deactivate user?</h3>
+        <p class="text-sm text-slate-400 mb-5">
+          <span x-text="confirmTarget.email"></span> will lose access immediately.
+        </p>
+        <div class="flex gap-3 justify-end">
+          <button @click="confirmTarget = null"
+                  class="px-4 py-2 rounded-lg text-sm text-slate-300 border border-slate-600 hover:bg-slate-700 transition-colors">
+            Cancel
+          </button>
+          <button @click="deactivate(confirmTarget)"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors">
+            Deactivate
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Add User modal -->
+  <template x-if="showAddModal">
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div class="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-6 w-full max-w-md mx-4"
+           @click.outside="showAddModal = false">
+
+        <div class="flex items-center justify-between mb-5">
+          <h3 class="text-base font-semibold text-slate-100">Add User</h3>
+          <button @click="showAddModal = false"
+                  aria-label="Close add user dialog"
+                  class="text-slate-500 hover:text-slate-300 transition-colors">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="space-y-4">
+          <!-- Email -->
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Email</label>
+            <input type="email" x-model="newUser.email" placeholder="user@example.com"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100 placeholder-slate-500 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"/>
+          </div>
+
+          <!-- Display name -->
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Display Name</label>
+            <input type="text" x-model="newUser.display_name" placeholder="Jane Smith"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100 placeholder-slate-500 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"/>
+          </div>
+
+          <!-- Password -->
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Initial Password</label>
+            <input type="password" x-model="newUser.password" placeholder="Min. 8 characters"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100 placeholder-slate-500 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"/>
+          </div>
+
+          <!-- Role -->
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Role</label>
+            <select x-model="newUser.role"
+                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-200 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors">
+              <option value="viewer">Viewer — read-only access</option>
+              <option value="analyst">Analyst — can create and update items</option>
+              <option value="admin">Admin — full tenant access</option>
+            </select>
+          </div>
+
+          <!-- Error -->
+          <div x-show="addError" class="px-3 py-2 rounded-lg bg-red-900/40 border border-red-800 text-sm text-red-300" x-text="addError"></div>
+        </div>
+
+        <div class="flex gap-3 justify-end mt-6">
+          <button @click="showAddModal = false"
+                  class="px-4 py-2 rounded-lg text-sm text-slate-300 border border-slate-600 hover:bg-slate-700 transition-colors">
+            Cancel
+          </button>
+          <button @click="createUser()" :disabled="addLoading"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50">
+            <span x-show="!addLoading">Add User</span>
+            <span x-show="addLoading" class="animate-pulse">Adding...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function usersPage(slug) {
+  return {
+    slug,
+    users: [],
+    total: 0,
+    page: 1,
+    perPage: 25,
+    loading: true,
+    confirmTarget: null,
+    showAddModal: false,
+    addError: '',
+    addLoading: false,
+    filters: {
+      search: '',
+      is_active: null,
+    },
+    newUser: {
+      email: '',
+      display_name: '',
+      password: '',
+      role: 'viewer',
+    },
+
+    init() {
+      this.loadUsers();
+    },
+
+    toggleActive(val) {
+      this.filters.is_active = val;
+      this.page = 1;
+      this.loadUsers();
+    },
+
+    async loadUsers() {
+      this.loading = true;
+      try {
+        const params = new URLSearchParams();
+        params.set('page', this.page);
+        params.set('per_page', this.perPage);
+        if (this.filters.search) params.set('search', this.filters.search);
+        if (this.filters.is_active !== null) params.set('is_active', this.filters.is_active);
+
+        const res = await fetch(`/api/v1/tenants/${slug}/users?${params}`, {
+          headers: Auth.getHeaders(),
+        });
+        if (!res.ok) throw new Error('Failed to load users');
+        const data = await res.json();
+        // Seed _pendingRole for inline dropdown
+        this.users = (data.items || []).map(u => ({ ...u, _pendingRole: u.role }));
+        this.total = data.total || 0;
+      } catch (e) {
+        showToast('Failed to load users', 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    prevPage() {
+      if (this.page > 1) { this.page--; this.loadUsers(); }
+    },
+
+    nextPage() {
+      if (this.page < Math.ceil(this.total / this.perPage)) { this.page++; this.loadUsers(); }
+    },
+
+    async updateRole(u) {
+      if (u._pendingRole === u.role) return;
+      try {
+        const res = await fetch(`/api/v1/tenants/${slug}/users/${u.id}`, {
+          method: 'PATCH',
+          headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: u._pendingRole }),
+        });
+        if (!res.ok) throw new Error('Failed to update role');
+        const updated = await res.json();
+        u.role = updated.role;
+        u._pendingRole = updated.role;
+        showToast('Role updated', 'success');
+      } catch (e) {
+        showToast('Failed to update role', 'error');
+        u._pendingRole = u.role; // revert
+      }
+    },
+
+    confirmDeactivate(u) {
+      this.confirmTarget = u;
+    },
+
+    async deactivate(u) {
+      try {
+        const res = await fetch(`/api/v1/tenants/${slug}/users/${u.id}`, {
+          method: 'DELETE',
+          headers: Auth.getHeaders(),
+        });
+        if (!res.ok) throw new Error('Failed to deactivate user');
+        u.is_active = false;
+        this.confirmTarget = null;
+        showToast('User deactivated', 'success');
+      } catch (e) {
+        showToast('Failed to deactivate user', 'error');
+        this.confirmTarget = null;
+      }
+    },
+
+    async reactivate(u) {
+      try {
+        const res = await fetch(`/api/v1/tenants/${slug}/users/${u.id}`, {
+          method: 'PATCH',
+          headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_active: true }),
+        });
+        if (!res.ok) throw new Error('Failed to reactivate user');
+        u.is_active = true;
+        showToast('User reactivated', 'success');
+      } catch (e) {
+        showToast('Failed to reactivate user', 'error');
+      }
+    },
+
+    async createUser() {
+      this.addError = '';
+      if (!this.newUser.email || !this.newUser.display_name || !this.newUser.password) {
+        this.addError = 'All fields are required.';
+        return;
+      }
+      if (this.newUser.password.length < 8) {
+        this.addError = 'Password must be at least 8 characters.';
+        return;
+      }
+      this.addLoading = true;
+      try {
+        const res = await fetch(`/api/v1/tenants/${slug}/users`, {
+          method: 'POST',
+          headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(this.newUser),
+        });
+        if (res.status === 409) {
+          this.addError = 'A user with that email already exists.';
+          return;
+        }
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          this.addError = err.detail || 'Failed to create user.';
+          return;
+        }
+        const created = await res.json();
+        this.users.unshift({ ...created, _pendingRole: created.role });
+        this.total += 1;
+        this.showAddModal = false;
+        this.newUser = { email: '', display_name: '', password: '', role: 'viewer' };
+        showToast('User created successfully', 'success');
+      } catch (e) {
+        this.addError = 'An unexpected error occurred.';
+      } finally {
+        this.addLoading = false;
+      }
+    },
+
+    formatDate(dt) {
+      if (!dt) return 'Never';
+      return new Date(dt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    },
+  }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+
+{% block title %}Preferences{% endblock %}
+{% block page_title %}My Preferences{% endblock %}
+
+{% block breadcrumb %}
+<p class="text-xs text-slate-500 mt-0.5">Personal settings</p>
+{% endblock %}
+
+{% block content %}
+<div x-data="userSettings()" class="max-w-xl space-y-6">
+
+  <!-- Appearance -->
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">Appearance</h2>
+
+    <div class="space-y-5">
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-2">Theme</label>
+        <div class="flex gap-3">
+          <template x-for="opt in themeOptions" :key="opt.value">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio"
+                     :value="opt.value"
+                     x-model="prefs.theme"
+                     class="w-4 h-4 text-blue-600 border-slate-600 bg-slate-900
+                            focus:ring-blue-500 focus:ring-offset-slate-800" />
+              <span class="text-sm text-slate-300" x-text="opt.label"></span>
+            </label>
+          </template>
+        </div>
+        <p class="text-xs text-slate-500 mt-1.5">
+          System follows your OS dark/light mode preference.
+        </p>
+      </div>
+
+      <div class="border-t border-slate-700 pt-5">
+        <label class="block text-xs font-medium text-slate-400 mb-2">Page size</label>
+        <select x-model.number="prefs.page_size"
+                class="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-200
+                       text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="10">10 rows</option>
+          <option value="25">25 rows</option>
+          <option value="50">50 rows</option>
+          <option value="100">100 rows</option>
+        </select>
+        <p class="text-xs text-slate-500 mt-1.5">Default number of rows shown in tables.</p>
+      </div>
+    </div>
+
+    <div class="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
+      <span x-show="msgs.appearance" class="text-sm"
+            :class="msgs.appearance_ok ? 'text-green-400' : 'text-red-400'"
+            x-text="msgs.appearance"></span>
+      <button @click="save('appearance')" :disabled="saving.appearance"
+              class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                     text-white transition-colors disabled:opacity-50">
+        <span x-show="!saving.appearance">Save</span>
+        <span x-show="saving.appearance" class="animate-pulse">Saving...</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Notifications -->
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-6">
+    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-5">Notifications</h2>
+
+    <div class="space-y-4">
+      <template x-for="notif in prefs.notifications" :key="notif.key">
+        <div class="flex items-center justify-between py-2 border-b border-slate-700 last:border-0">
+          <div>
+            <p class="text-sm text-slate-200 font-medium" x-text="notif.label"></p>
+            <p class="text-xs text-slate-500" x-text="notif.description"></p>
+          </div>
+          <button @click="notif.enabled = !notif.enabled"
+                  :class="notif.enabled ? 'bg-blue-600' : 'bg-slate-600'"
+                  class="relative inline-flex h-5 w-9 rounded-full transition-colors flex-shrink-0
+                         focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
+                         focus:ring-offset-slate-800">
+            <span :class="notif.enabled ? 'translate-x-4' : 'translate-x-0.5'"
+                  class="inline-block w-4 h-4 mt-0.5 rounded-full bg-white shadow transition-transform">
+            </span>
+          </button>
+        </div>
+      </template>
+    </div>
+
+    <div class="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
+      <span x-show="msgs.notifications" class="text-sm"
+            :class="msgs.notifications_ok ? 'text-green-400' : 'text-red-400'"
+            x-text="msgs.notifications"></span>
+      <button @click="save('notifications')" :disabled="saving.notifications"
+              class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500
+                     text-white transition-colors disabled:opacity-50">
+        <span x-show="!saving.notifications">Save</span>
+        <span x-show="saving.notifications" class="animate-pulse">Saving...</span>
+      </button>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function userSettings() {
+  return {
+    prefs: {
+      theme: 'system',
+      page_size: 25,
+      notifications: [
+        {
+          key: 'item_changed',
+          label: 'Item changes',
+          description: 'Notify me when items I own are modified.',
+          enabled: true,
+        },
+        {
+          key: 'mentions',
+          label: 'Mentions',
+          description: 'Notify me when I am mentioned in a comment.',
+          enabled: true,
+        },
+        {
+          key: 'weekly_summary',
+          label: 'Weekly summary',
+          description: 'Receive a weekly digest of activity.',
+          enabled: false,
+        },
+      ],
+    },
+
+    themeOptions: [
+      { value: 'dark',   label: 'Dark'   },
+      { value: 'light',  label: 'Light'  },
+      { value: 'system', label: 'System' },
+    ],
+
+    saving: { appearance: false, notifications: false },
+    msgs:   { appearance: '', appearance_ok: false, notifications: '', notifications_ok: false },
+
+    async init() {
+      try {
+        const res = await fetch('/api/v1/me/preferences', { headers: Auth.getHeaders() });
+        if (res.ok) {
+          const d = await res.json();
+          if (d.theme)      this.prefs.theme     = d.theme;
+          if (d.page_size)  this.prefs.page_size = d.page_size;
+          if (d.notifications) {
+            this.prefs.notifications = this.prefs.notifications.map(n => ({
+              ...n,
+              enabled: d.notifications[n.key] ?? n.enabled,
+            }));
+          }
+        }
+      } catch (_) {}
+    },
+
+    async save(section) {
+      this.saving[section] = true;
+      this.msgs[section] = '';
+
+      let body;
+      if (section === 'appearance') {
+        body = { theme: this.prefs.theme, page_size: this.prefs.page_size };
+      } else {
+        const notifMap = {};
+        this.prefs.notifications.forEach(n => { notifMap[n.key] = n.enabled; });
+        body = { notifications: notifMap };
+      }
+
+      try {
+        const res = await fetch('/api/v1/me/preferences', {
+          method: 'PATCH',
+          headers: { ...Auth.getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          this.msgs[section] = err.detail || 'Failed to save preferences.';
+          this.msgs[section + '_ok'] = false;
+        } else {
+          this.msgs[section] = 'Saved.';
+          this.msgs[section + '_ok'] = true;
+          showToast('Preferences saved.', 'success');
+        }
+      } catch (_) {
+        this.msgs[section] = 'Network error.';
+        this.msgs[section + '_ok'] = false;
+      } finally {
+        this.saving[section] = false;
+      }
+    },
+  };
+}
+</script>
+{% endblock %}
