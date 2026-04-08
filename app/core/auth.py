@@ -3,9 +3,10 @@
 Priority order:
   1. Cloudflare Zero Trust header  (Cf-Access-Authenticated-User-Email)
   2. Azure AD / Entra ID header    (X-MS-CLIENT-PRINCIPAL-NAME)
-  3. JWT Bearer token               (Authorization: Bearer <token>)
-  4. API key                        (X-API-Key: <key>)
-  5. No auth -> None
+  3. Session cookie                 (session=<jwt>)
+  4. JWT Bearer token               (Authorization: Bearer <token>)
+  5. API key                        (X-API-Key: <key>)
+  6. No auth -> None
 
 External identity providers (Cloudflare, Azure) auto-provision users on first
 login. Unknown emails get a "pending" role; the configured ADMIN_EMAIL is
@@ -50,18 +51,23 @@ async def get_current_user(request: Request) -> UserContext | None:
                 registry, settings, azure_email.strip().lower(), "azure", request
             )
 
-    # ── 3. JWT Bearer token ───────────────────────────────────────────
+    # ── 3. Session cookie (preferred for browser clients) ─────────────
+    session_cookie = request.cookies.get("session")
+    if session_cookie:
+        return await _resolve_jwt_user(registry, session_cookie)
+
+    # ── 4. JWT Bearer token ───────────────────────────────────────────
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header[7:]
         return await _resolve_jwt_user(registry, token)
 
-    # ── 4. API key ────────────────────────────────────────────────────
+    # ── 5. API key ────────────────────────────────────────────────────
     api_key = request.headers.get("X-API-Key")
     if api_key:
         return await _resolve_api_key_user(registry, api_key)
 
-    # ── 5. No credentials ────────────────────────────────────────────
+    # ── 6. No credentials ────────────────────────────────────────────
     return None
 
 
@@ -204,8 +210,15 @@ async def _resolve_external_user(
 
 
 async def _resolve_jwt_user(registry, token: str) -> UserContext:
-    """Resolve a JWT token to a UserContext."""
+    """Resolve a JWT token to a UserContext.
+
+    Raises ``ForbiddenError`` if the token carries a ``totp_pending`` claim,
+    meaning the user authenticated with password but has not yet completed
+    TOTP verification.
+    """
     payload = registry.auth.decode_token(token)
+    if payload.get("totp_pending"):
+        raise ForbiddenError("TOTP verification required")
     user_id = payload.get("sub")
     if not user_id:
         raise AuthenticationError("Invalid token: no subject")

@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# CI Pipeline — Lint, test, build Docker image, push to ACR on master.
+#
+# Required configuration (update these variables before use):
+#   acrServiceConnection  — ADO service connection name for your ACR
+#   acrName               — Azure Container Registry name (without .azurecr.io)
+#   imageName             — Docker image name / repository path in the ACR
+# ---------------------------------------------------------------------------
+
+trigger:
+  branches:
+    include:
+      - master
+      - develop
+      - feature/*
+      - bugfix/*
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - name: acrServiceConnection
+    value: 'YOUR_ACR_SERVICE_CONNECTION'   # ADO service connection — configure in project settings
+  - name: acrName
+    value: 'YOUR_ACR_NAME'                 # e.g. mycompanyacr (no .azurecr.io suffix)
+  - name: imageName
+    value: 'YOUR_IMAGE_NAME'               # e.g. myapp or myorg/myapp
+  - name: pythonVersion
+    value: '3.12'
+
+stages:
+  # ---- Lint & Test -----------------------------------------------------------
+  - stage: Build
+    displayName: 'Lint, Test & Build'
+    jobs:
+      - job: LintAndTest
+        displayName: 'Ruff + Pytest'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install ".[dev]"
+            displayName: 'Install dependencies'
+
+          - script: |
+              ruff check app/ tests/
+            displayName: 'Ruff lint'
+
+          - script: |
+              pytest tests/ --tb=short -q
+            displayName: 'Pytest'
+
+      # ---- Docker build (always) + push (master only) ----------------------
+      - job: DockerBuild
+        displayName: 'Docker build & push'
+        dependsOn: LintAndTest
+        steps:
+          - task: Docker@2
+            displayName: 'Build Docker image'
+            inputs:
+              command: build
+              Dockerfile: Dockerfile
+              repository: '$(imageName)'
+              tags: |
+                $(Build.BuildId)
+                latest
+
+          - task: Docker@2
+            displayName: 'Tag image for ACR'
+            condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+            inputs:
+              command: tag
+              arguments: '$(imageName):$(Build.BuildId) $(acrName).azurecr.io/$(imageName):$(Build.BuildId)'
+
+          - task: Docker@2
+            displayName: 'Push to ACR'
+            condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+            inputs:
+              command: push
+              containerRegistry: '$(acrServiceConnection)'
+              repository: '$(imageName)'
+              tags: |
+                $(Build.BuildId)
+                latest

@@ -2,25 +2,42 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Request
 
+from app.core.auth import require_auth
 from app.core.dependencies import get_auth_service, get_users_service
 from app.core.exceptions import AuthenticationError
-from app.services.auth.schemas import LoginRequest, TokenResponse
+from app.services.auth.schemas import (
+    BackupCodesResponse,
+    LoginRequest,
+    LoginResponse,
+    TOTPEnableRequest,
+    TOTPSetupResponse,
+    TOTPVerifyRequest,
+    TokenResponse,
+    UserContext,
+)
 from app.services.auth.service import AuthService
 from app.services.users.service import UsersService
 
 router = APIRouter()
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=LoginResponse)
 async def login(
     body: LoginRequest,
     request: Request,
     auth: AuthService = Depends(get_auth_service),
     users: UsersService = Depends(get_users_service),
-) -> TokenResponse:
-    """Authenticate with email + password, receive JWT access token."""
+) -> LoginResponse:
+    """Authenticate with email + password.
+
+    If the user has TOTP enabled a short-lived *partial token* is returned and
+    ``requires_totp`` is set to ``True``.  The client must call
+    ``POST /auth/totp/verify`` with that token to receive a full access token.
+    """
     password_hash = await users.get_password_hash(body.email)
     if not password_hash or not auth.verify_password(body.password, password_hash):
         raise AuthenticationError("Invalid email or password")
@@ -29,8 +46,17 @@ async def login(
     if not user or not user.is_active:
         raise AuthenticationError("Invalid email or password")
 
+    # Check whether the underlying ORM object has TOTP enabled
+    user_obj = await _get_user_orm(request, user.id)
+    if user_obj is not None and getattr(user_obj, "totp_enabled", False):
+        partial_token = auth.create_access_token(user.id, totp_pending=True)
+        return LoginResponse(requires_totp=True, partial_token=partial_token)
+
     access_token = auth.create_access_token(user.id)
-    return auth.build_token_response(access_token)
+    return LoginResponse(
+        access_token=access_token,
+        expires_in=auth._settings.jwt_access_token_expire_minutes * 60,
+    )
 
 
 @router.post("/setup", response_model=dict)
@@ -48,3 +74,101 @@ async def initial_setup(
         display_name="Admin",
     )
     return {"message": "Superadmin created", "email": user.email}
+
+
+# ── TOTP endpoints ────────────────────────────────────────────────────────────
+
+@router.post("/totp/setup", response_model=TOTPSetupResponse)
+async def totp_setup(
+    current_user: UserContext = Depends(require_auth),
+    auth: AuthService = Depends(get_auth_service),
+) -> TOTPSetupResponse:
+    """Generate a new TOTP secret and QR code for the authenticated user.
+
+    The returned *secret* must be confirmed by calling ``POST /auth/totp/enable``
+    with a valid code from the authenticator app.  The secret is **not** saved
+    until that confirmation step succeeds.
+    """
+    return auth.generate_totp_secret(current_user.email)
+
+
+@router.post("/totp/enable", response_model=BackupCodesResponse)
+async def totp_enable(
+    body: TOTPEnableRequest,
+    current_user: UserContext = Depends(require_auth),
+    auth: AuthService = Depends(get_auth_service),
+) -> BackupCodesResponse:
+    """Confirm TOTP setup by validating the first code.
+
+    Persists the secret, marks the user's TOTP as enabled, and returns a set of
+    one-time backup codes (shown **exactly once** — store them securely).
+
+    Pass the ``secret`` returned by ``POST /auth/totp/setup`` together with the
+    ``code`` from the authenticator app.
+    """
+    return await auth.enable_totp(current_user.user_id, body.secret, body.code)
+
+
+@router.post("/totp/verify", response_model=TokenResponse)
+async def totp_verify(
+    body: TOTPVerifyRequest,
+    request: Request,
+    auth: AuthService = Depends(get_auth_service),
+) -> TokenResponse:
+    """Exchange a partial token + TOTP code for a full access token.
+
+    The ``Authorization: Bearer <partial_token>`` header must carry the
+    short-lived token that was issued during the login step when
+    ``requires_totp`` was ``True``.
+    """
+    # Extract the partial token from Authorization header (cookie may not be set yet)
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise AuthenticationError("Partial token required in Authorization header")
+    partial_token = auth_header[7:]
+
+    # Decode without going through the full resolver (which blocks totp_pending)
+    try:
+        payload = auth.decode_token(partial_token)
+    except AuthenticationError:
+        raise AuthenticationError("Invalid or expired partial token")
+
+    if not payload.get("totp_pending"):
+        raise AuthenticationError("Token is not a TOTP partial token")
+
+    user_id_str = payload.get("sub")
+    if not user_id_str:
+        raise AuthenticationError("Invalid token: no subject")
+
+    user_id = UUID(user_id_str)
+    verified = await auth.verify_totp(user_id, body.code)
+    if not verified:
+        raise AuthenticationError("Invalid verification code")
+
+    access_token = auth.create_access_token(user_id)
+    return auth.build_token_response(access_token)
+
+
+@router.post("/totp/disable", response_model=dict)
+async def totp_disable(
+    body: TOTPVerifyRequest,
+    current_user: UserContext = Depends(require_auth),
+    auth: AuthService = Depends(get_auth_service),
+) -> dict:
+    """Disable TOTP for the authenticated user after verifying the current code."""
+    verified = await auth.verify_totp(current_user.user_id, body.code)
+    if not verified:
+        raise AuthenticationError("Invalid verification code")
+    await auth.disable_totp(current_user.user_id)
+    return {"message": "Two-factor authentication has been disabled"}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _get_user_orm(request: Request, user_id: UUID):
+    """Fetch the raw ORM User object to read TOTP fields not in UserRead."""
+    from app.services.users.models import User
+
+    registry = request.app.state.registry
+    async with registry.users._session_factory() as session:
+        return await session.get(User, str(user_id))

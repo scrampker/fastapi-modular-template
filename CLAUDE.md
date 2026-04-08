@@ -201,6 +201,84 @@ async def list_items(
     ...
 ```
 
+## Bootstrap Launcher (`launch.py`)
+
+A zero-dependency Python script that handles the full startup lifecycle:
+- Python version gate (configurable `MIN_PYTHON`)
+- Venv creation + automatic re-exec inside venv via `os.execv`
+- Dependency caching: hashes `pyproject.toml`, skips reinstall when unchanged
+- `.env.example` → `.env` auto-copy on first run
+- PID file management + port cleanup (kills stale processes)
+- Crash supervision: tracks rapid failures, auto-restarts on exit code 75
+- Environment probing: writes `data/env_probe.json` for the web UI
+- Crash log persistence to `data/crash_logs/`
+
+Configure via constants at the top of `launch.py`:
+```python
+APP_NAME = "MyApp"
+ENTRY_POINT = "app.main:app"
+MIN_PYTHON = (3, 10)
+DEFAULT_PORT = 8000
+```
+
+## Admin API (`/api/v1/admin/`)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/version` | GET | Version, git branch/commit/dirty, `build_ts` (ISO timestamp from server start) |
+| `/update-check` | GET | Dual detection: local file mtime changes + remote git commits behind |
+| `/restart` | POST | `git pull --ff-only` then restart server |
+| `/restart-only` | POST | Restart without pulling updates |
+
+The update-check snapshots source file mtimes at startup and compares against current disk state every time it's called — catches edits made while the server runs (Claude Code, manual edits, `git pull` in another terminal).
+
+## Background Task Engine (`app/core/task_engine.py`)
+
+In-process async task lifecycle without Celery/Redis:
+- States: PENDING → RUNNING → COMPLETED/FAILED/CANCELLED/WAITING
+- Progress tracking (0-100) with status text
+- Output streaming via per-subscriber `asyncio.Queue`
+- Human-in-the-loop: `ask_question()` / `submit_answer()` with configurable timeout
+- REST API: `/api/v1/tasks/summary`, `/tasks`, `/tasks/{id}/cancel`, `/tasks/{id}/respond`, `/tasks/clear-finished`
+- WebSocket: `/api/v1/ws/tasks/{task_id}` — live streaming with 30s keepalive
+
+## TOTP / Two-Factor Authentication
+
+Full 2FA stack baked in:
+- TOTP secret generation via `pyotp` + QR code via `qrcode`
+- JWT flow: successful password login with TOTP enabled returns a 5-minute `totp_pending` partial token
+- `get_current_user` blocks access when `totp_pending` claim is present
+- Backup codes: 8 random codes, bcrypt-hashed, single-use
+- `must_change_password` flag: forces password rotation on first login
+- Login UI: two-step Alpine.js flow (credentials → TOTP code)
+- Endpoints: `/auth/totp/setup`, `/totp/enable`, `/totp/verify`, `/totp/disable`
+
+## Request Logging (`app/core/request_logging.py`)
+
+Dual-mode logging middleware:
+- Request/response timing on every request
+- Conditional body capture in debug mode with sensitive path redaction
+- File mode: `RotatingFileHandler` (5MB, 3 backups) to `data/logs/{app_name}.log`
+- Stdout mode: `StreamHandler` only (for containers / Azure Container Insights)
+- Toggle via `app_env` setting (development → file, production → stdout)
+
+## Auto-Update UI (base.html)
+
+The frontend polls `/api/v1/admin/update-check` every 30s and when an update is detected:
+1. Plays a notification ding (Web Audio API)
+2. Shows a centered modal with SVG countdown ring (10s)
+3. "Restart Now" / "Cancel" buttons
+4. Auto-restarts when countdown reaches 0
+5. Full-page restart overlay with server health polling until new instance is up
+
+Also includes: server status indicator (nav), task switcher (Tab key), tricolor notification bell, toast system, `appCache` (stale-while-revalidate fetch wrapper), mobile responsive sidebar.
+
+## Docker & CI/CD
+
+- **Dockerfile**: Multi-stage build, non-root user, `HEALTHCHECK`, configurable port via `APP_PORT` arg
+- **azure-pipelines-ci.yml**: Ruff lint → pytest → Docker build + ACR push (placeholder service connection names)
+- **azure-pipelines-cd.yml**: 3-stage deployment (Dev auto, Test + Prod with manual approval gates)
+
 ## Proven Gotchas
 
 1. **Composite services may not need session_factory** — Pure composites that only call other services don't need a DB session. Only give them session_factory if they own transactions (e.g., ingestion pipelines).

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import audit, auth, items, search, settings, tenants, users
+from app.api.v1 import admin, audit, auth, items, search, settings, tasks, tenants, users, ws
 
 api_v1_router = APIRouter()
 
@@ -37,3 +37,12 @@ api_v1_router.include_router(users.me_router, tags=["users"])
 # Settings and search
 api_v1_router.include_router(settings.router, prefix="/settings", tags=["settings"])
 api_v1_router.include_router(search.router, prefix="/search", tags=["search"])
+
+# Admin (version, update-check, restart)
+api_v1_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+
+# Tasks (background task lifecycle)
+api_v1_router.include_router(tasks.router)
+
+# WebSocket (task streaming)
+api_v1_router.include_router(ws.router)

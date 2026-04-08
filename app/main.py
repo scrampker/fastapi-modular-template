@@ -10,9 +10,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app import __version__
 from app.core.config import Settings, get_settings
 from app.core.database import Base, get_engine, get_session_factory
 from app.core.middleware import register_exception_handlers, register_security_headers
+from app.core.request_logging import RequestLoggingMiddleware, setup_logging
 from app.core.schemas import HealthResponse
 from app.core.service_registry import ServiceRegistry
 
@@ -122,6 +124,11 @@ def create_app() -> FastAPI:
     register_security_headers(app)
     register_exception_handlers(app)
 
+    # Request logging middleware (dual-mode: file + optional stdout for containers)
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+    setup_logging(settings.app_name, data_dir, log_stdout=settings.app_env != "development")
+    app.add_middleware(RequestLoggingMiddleware, app_debug=settings.app_debug)
+
     # API routes
     from app.api.v1.router import api_v1_router
     app.include_router(api_v1_router, prefix="/api/v1")
@@ -136,11 +143,27 @@ def create_app() -> FastAPI:
         app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
     # Health check (no auth required)
+    import sys
+    import time
+    _boot_ts = time.time()
+
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
+        db_ok = True
+        try:
+            engine = get_engine()
+            from sqlalchemy import text
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        except Exception:
+            db_ok = False
         return HealthResponse(
-            version="0.1.0",
+            version=__version__,
             environment=settings.app_env,
+            python_version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            database="connected" if db_ok else "unavailable",
+            db_ok=db_ok,
+            boot_ts=_boot_ts,
         )
 
     return app

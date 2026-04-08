@@ -38,28 +38,284 @@
   <!-- Custom CSS -->
   <link rel="stylesheet" href="/static/css/main.css" />
 
+  <style>
+    [x-cloak] { display: none !important; }
+
+    /* Countdown ring transition helper */
+    .countdown-ring-fill {
+      transition: stroke-dashoffset 1s linear;
+    }
+
+    /* Restart overlay spinner */
+    @keyframes restart-spin { to { transform: rotate(360deg); } }
+    .restart-spinner { animation: restart-spin 1s linear infinite; }
+
+    /* Task spinner */
+    @keyframes task-spin { to { transform: rotate(360deg); } }
+    .task-spinner {
+      display: inline-block; width: 10px; height: 10px;
+      border: 2px solid theme('colors.slate.600');
+      border-top-color: theme('colors.green.400');
+      border-radius: 50%;
+      animation: task-spin 0.8s linear infinite;
+    }
+  </style>
+
   {% block head %}{% endblock %}
 </head>
+
+<!--
+  Restart guard: if we're reloading after a server restart, show the overlay
+  immediately (prevents dead-page flash during server warmup).
+-->
+<script>
+  if (sessionStorage.getItem('app_restarting')) {
+    sessionStorage.removeItem('app_restarting');
+    document.addEventListener('DOMContentLoaded', function () {
+      var ov = document.getElementById('restart-overlay');
+      if (ov) { ov.classList.remove('hidden'); ov.style.display = 'flex'; }
+      var msg = document.getElementById('restart-msg');
+      if (msg) msg.textContent = 'Loading...';
+      setTimeout(function () { if (ov) ov.style.display = 'none'; }, 800);
+    });
+  }
+</script>
+
 <body class="h-full bg-slate-900 text-slate-100 font-sans antialiased">
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     App Cache (stale-while-revalidate, sessionStorage-backed)
+     window.appCache.get(url, {maxAge})
+     window.appCache.invalidate(url)
+     window.appCache.invalidatePrefix(prefix)
+     window.appCache.load(url, applyFn, component, refreshKey, opts)
+════════════════════════════════════════════════════════════════════════ -->
+<script>
+window.appCache = (function () {
+  const PREFIX = 'ac_';
+  const TS_PREFIX = 'ac_ts_';
+
+  function key(url) { return PREFIX + url; }
+  function tsKey(url) { return TS_PREFIX + url; }
+
+  function put(url, data) {
+    try {
+      sessionStorage.setItem(key(url), JSON.stringify(data));
+      sessionStorage.setItem(tsKey(url), Date.now().toString());
+    } catch (e) { evict(); }
+  }
+
+  function read(url, maxAge) {
+    try {
+      const raw = sessionStorage.getItem(key(url));
+      if (!raw) return null;
+      const ts = parseInt(sessionStorage.getItem(tsKey(url)) || '0');
+      if (maxAge && (Date.now() - ts) > maxAge * 1000) return null;
+      return JSON.parse(raw);
+    } catch (e) { return null; }
+  }
+
+  function evict() {
+    const keys = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      if (k && k.startsWith(PREFIX)) keys.push(k);
+    }
+    keys.sort((a, b) => {
+      const ta = parseInt(sessionStorage.getItem(TS_PREFIX + a.slice(PREFIX.length)) || '0');
+      const tb = parseInt(sessionStorage.getItem(TS_PREFIX + b.slice(PREFIX.length)) || '0');
+      return ta - tb;
+    });
+    for (let i = 0; i < Math.ceil(keys.length / 2); i++) {
+      const url = keys[i].slice(PREFIX.length);
+      sessionStorage.removeItem(key(url));
+      sessionStorage.removeItem(tsKey(url));
+    }
+  }
+
+  return {
+    get(url, opts) {
+      const maxAge = (opts && opts.maxAge) || 300;
+      const cached = read(url, maxAge);
+      const fresh = fetch(url).then(async r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        put(url, data);
+        return data;
+      });
+      return { data: cached, fresh };
+    },
+
+    async load(url, apply, component, refreshKey, opts) {
+      const { data: cached, fresh } = this.get(url, opts);
+      if (cached) apply(cached);
+      if (component && refreshKey) component[refreshKey] = true;
+      try {
+        const liveData = await fresh;
+        apply(liveData);
+      } catch (e) {
+        if (!cached) throw e;
+      } finally {
+        if (component && refreshKey) component[refreshKey] = false;
+      }
+    },
+
+    invalidate(url) {
+      sessionStorage.removeItem(key(url));
+      sessionStorage.removeItem(tsKey(url));
+    },
+
+    invalidatePrefix(prefix) {
+      const toRemove = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith(PREFIX + prefix)) toRemove.push(k);
+      }
+      for (const k of toRemove) {
+        const url = k.slice(PREFIX.length);
+        sessionStorage.removeItem(key(url));
+        sessionStorage.removeItem(tsKey(url));
+      }
+    },
+  };
+})();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     Global toast system: window.toast(message, type)
+     Types: success | error | info | warning
+════════════════════════════════════════════════════════════════════════ -->
+<script>
+window.toast = function (message, type) {
+  type = type || 'info';
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+
+  const colorMap = {
+    success: 'bg-green-900/80 border-green-500 text-green-300',
+    error:   'bg-red-900/80 border-red-500 text-red-300',
+    info:    'bg-blue-900/80 border-blue-500 text-blue-300',
+    warning: 'bg-yellow-900/80 border-yellow-500 text-yellow-300',
+  };
+  const iconMap = {
+    success: '✓', error: '✗', info: 'ℹ', warning: '⚠',
+  };
+
+  const el = document.createElement('div');
+  el.className = [
+    'pointer-events-auto flex items-start gap-2.5 px-4 py-3 rounded-lg border',
+    'shadow-lg text-sm backdrop-blur-sm animate-fade-in',
+    colorMap[type] || colorMap.info,
+  ].join(' ');
+  el.style.cssText = 'animation: toastSlideIn 0.2s ease-out;';
+  el.innerHTML = `
+    <span class="flex-shrink-0 font-bold">${iconMap[type] || 'ℹ'}</span>
+    <span class="flex-1">${message}</span>
+    <button onclick="this.parentElement.remove()" class="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity leading-none">&times;</button>
+  `;
+
+  container.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transform = 'translateX(1rem)'; el.style.transition = 'all 0.3s'; setTimeout(() => el.remove(), 300); }, 4000);
+};
+</script>
+<style>
+  @keyframes toastSlideIn {
+    from { opacity: 0; transform: translateX(1rem); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+</style>
 
 <div class="flex h-full" x-data="appShell()">
 
-  <!-- ── Sidebar ────────────────────────────────────────────────────────── -->
-  <aside class="w-56 flex-shrink-0 flex flex-col bg-slate-950 border-r border-slate-800">
+  <!-- ══════════════════════════════════════════════════════════════════
+       Sidebar Overlay (mobile)
+  ══════════════════════════════════════════════════════════════════ -->
+  <div x-show="sidebarOpen && mobileView"
+       x-cloak
+       @click="sidebarOpen = false"
+       class="fixed inset-0 z-20 bg-black/60 lg:hidden"
+       x-transition:enter="transition-opacity duration-200"
+       x-transition:enter-start="opacity-0"
+       x-transition:enter-end="opacity-100"
+       x-transition:leave="transition-opacity duration-200"
+       x-transition:leave-start="opacity-100"
+       x-transition:leave-end="opacity-0">
+  </div>
 
-    <!-- Logo / app name -->
-    <div class="h-14 flex items-center px-4 border-b border-slate-800">
-      <a href="/c/{{ slug | default('default') }}/dashboard" class="flex items-center gap-2 group">
+  <!-- ══════════════════════════════════════════════════════════════════
+       Sidebar
+  ══════════════════════════════════════════════════════════════════ -->
+  <aside :class="[
+           'flex-shrink-0 flex flex-col bg-slate-950 border-r border-slate-800 transition-transform duration-200 z-30',
+           'w-56',
+           mobileView ? 'fixed inset-y-0 left-0' : 'relative',
+           (mobileView && !sidebarOpen) ? '-translate-x-full' : 'translate-x-0',
+         ]">
+
+    <!-- Logo / app name + server status indicator -->
+    <div class="h-14 flex items-center justify-between px-4 border-b border-slate-800 flex-shrink-0">
+      <a href="/c/{{ slug | default('default') }}/dashboard" class="flex items-center gap-2 group min-w-0">
         <div class="w-7 h-7 rounded bg-blue-500 flex items-center justify-center text-white font-bold text-sm
-                    group-hover:bg-blue-400 transition-colors">
+                    group-hover:bg-blue-400 transition-colors flex-shrink-0">
           {{ app_name[0] | upper if app_name else 'A' }}
         </div>
-        <span class="font-semibold text-slate-100 text-sm tracking-wide">{{ app_name }}</span>
+        <span class="font-semibold text-slate-100 text-sm tracking-wide truncate">{{ app_name }}</span>
       </a>
+
+      <!-- Server status dot -->
+      <div class="relative flex-shrink-0 ml-1" @mouseenter="showServerPopup = true" @mouseleave="showServerPopup = false"
+           @click="showServerPopup = !showServerPopup">
+        <button class="p-1 rounded hover:bg-slate-800 transition-colors" :title="serverOk ? 'Server online' : 'Server error'">
+          <span class="block w-2.5 h-2.5 rounded-full transition-colors"
+                :class="serverOk ? 'bg-green-400 shadow-[0_0_6px_theme(colors.green.400)]' : 'bg-red-500 shadow-[0_0_6px_theme(colors.red.500)]'">
+          </span>
+        </button>
+
+        <!-- Server status popup -->
+        <div x-show="showServerPopup" x-cloak @click.stop
+             class="absolute left-0 top-full mt-1 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-3 z-50 text-xs">
+          <div class="font-semibold mb-2" :class="serverOk ? 'text-green-400' : 'text-red-400'"
+               x-text="serverOk ? 'Server Online' : 'Server Error'"></div>
+          <div class="space-y-1">
+            <div class="flex justify-between gap-2">
+              <span class="text-slate-400">Version</span>
+              <span class="text-slate-200 font-mono" x-text="serverVersion || '—'"></span>
+            </div>
+            <div class="flex justify-between gap-2">
+              <span class="text-slate-400">Built</span>
+              <span class="text-slate-200 font-mono" x-text="serverBuildTs || '—'"></span>
+            </div>
+            <div class="flex justify-between gap-2">
+              <span class="text-slate-400">Python</span>
+              <span class="text-slate-200" x-text="serverPython || '—'"></span>
+            </div>
+            <div class="flex justify-between gap-2">
+              <span class="text-slate-400">Database</span>
+              <span class="text-slate-200" x-text="serverDb || '—'"></span>
+            </div>
+            <template x-if="gitBranch">
+              <div class="border-t border-slate-700 pt-1 mt-1 space-y-1">
+                <div class="flex justify-between gap-2">
+                  <span class="text-slate-400">Branch</span>
+                  <span class="text-slate-200 font-mono truncate" x-text="gitBranch"></span>
+                </div>
+                <div class="flex justify-between gap-2">
+                  <span class="text-slate-400">Commit</span>
+                  <span class="text-slate-200 font-mono" x-text="gitCommit ? gitCommit.slice(0,8) : '—'"></span>
+                </div>
+                <div x-show="gitDirty" class="flex justify-between gap-2">
+                  <span class="text-slate-400">Status</span>
+                  <span class="text-yellow-400">uncommitted</span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Tenant selector -->
-    <div class="px-3 py-3 border-b border-slate-800">
+    <div class="px-3 py-3 border-b border-slate-800 flex-shrink-0">
       <div class="relative" x-data="tenantSelector()">
         <button @click="open = !open"
                 class="w-full flex items-center justify-between px-3 py-2 rounded-md bg-slate-800
@@ -146,7 +402,7 @@
     </nav>
 
     <!-- Footer / user menu -->
-    <div class="border-t border-slate-800 px-3 py-3">
+    <div class="border-t border-slate-800 px-3 py-3 flex-shrink-0">
       <div class="flex items-center gap-2" x-data="{ menuOpen: false }">
         <div class="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-xs font-semibold
                     text-white flex-shrink-0">
@@ -186,16 +442,30 @@
     </div>
   </aside>
 
-  <!-- ── Main content ───────────────────────────────────────────────────── -->
+  <!-- ══════════════════════════════════════════════════════════════════
+       Main content area
+  ══════════════════════════════════════════════════════════════════ -->
   <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
 
     <!-- Top bar -->
-    <header class="h-14 flex items-center justify-between px-6 bg-slate-900 border-b border-slate-800 flex-shrink-0">
-      <div>
-        <h1 class="text-base font-semibold text-slate-100">{% block page_title %}{% endblock %}</h1>
-        {% block breadcrumb %}{% endblock %}
+    <header class="h-14 flex items-center justify-between px-4 sm:px-6 bg-slate-900 border-b border-slate-800 flex-shrink-0 gap-3">
+      <div class="flex items-center gap-3 min-w-0">
+        <!-- Hamburger (mobile only) -->
+        <button @click="sidebarOpen = !sidebarOpen"
+                class="lg:hidden p-1.5 rounded-md hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors flex-shrink-0"
+                aria-label="Toggle sidebar">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+          </svg>
+        </button>
+
+        <div class="min-w-0">
+          <h1 class="text-base font-semibold text-slate-100 truncate">{% block page_title %}{% endblock %}</h1>
+          {% block breadcrumb %}{% endblock %}
+        </div>
       </div>
-      <div class="flex items-center gap-3">
+
+      <div class="flex items-center gap-2 flex-shrink-0">
         {% block header_actions %}{% endblock %}
 
         <!-- Search / Command Palette trigger -->
@@ -212,19 +482,223 @@
                       bg-slate-900 border border-slate-600">Ctrl+K</kbd>
         </button>
 
-        <!-- Notifications placeholder -->
-        <button class="p-1.5 rounded-md hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
-                title="Notifications">
-          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+        <!-- Task badge button -->
+        <button @click="showTaskSwitcher = !showTaskSwitcher; if(showTaskSwitcher) loadTaskList()"
+                class="relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-700
+                       hover:border-slate-500 text-slate-400 hover:text-slate-200 text-xs transition-colors"
+                :class="(taskRunning > 0 || taskFailed > 0) ? 'border-slate-600' : 'opacity-60'"
+                :title="taskBadgeTitle">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
           </svg>
+          <span class="hidden sm:inline">Tasks</span>
+          <template x-if="taskRunning > 0">
+            <span class="inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full text-[0.6rem] font-bold bg-green-900/60 text-green-400" x-text="taskRunning"></span>
+          </template>
+          <template x-if="taskFailed > 0">
+            <span class="inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full text-[0.6rem] font-bold bg-red-900/60 text-red-400" x-text="taskFailed"></span>
+          </template>
+          <template x-if="taskPending > 0">
+            <span class="inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full text-[0.6rem] font-bold bg-yellow-900/60 text-yellow-400" x-text="taskPending"></span>
+          </template>
+          <template x-if="taskStale > 0 && taskRunning === 0 && taskFailed === 0 && taskPending === 0">
+            <span class="inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full text-[0.6rem] font-bold bg-slate-700 text-slate-400" x-text="taskStale"></span>
+          </template>
         </button>
+
+        <!-- Notification bell -->
+        <div class="relative" x-show="notifLoaded" x-cloak
+             @mouseenter="notifOpen = true" @mouseleave="notifOpen = false">
+          <button @click="notifOpen = !notifOpen"
+                  class="relative p-1.5 rounded-md hover:bg-slate-800 text-slate-400 hover:text-slate-200
+                         transition-colors border border-transparent"
+                  :class="notifOpen ? 'border-blue-500/50 bg-slate-800' : ''"
+                  :title="notifCounts.total + ' notification(s)'">
+            <!-- Bell icon -->
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+            </svg>
+            <!-- Tricolor dots overlay -->
+            <div x-show="notifCounts.total > 0" class="absolute -top-0.5 -right-0.5 flex gap-0.5">
+              <template x-if="notifCounts.red > 0">
+                <span class="relative">
+                  <span class="block w-2 h-2 rounded-full bg-red-500"></span>
+                </span>
+              </template>
+              <template x-if="notifCounts.yellow > 0">
+                <span class="block w-2 h-2 rounded-full bg-yellow-400"></span>
+              </template>
+              <template x-if="notifCounts.green > 0">
+                <span class="block w-2 h-2 rounded-full bg-green-400"></span>
+              </template>
+            </div>
+          </button>
+
+          <!-- Notification dropdown -->
+          <div x-show="notifOpen" x-cloak x-transition
+               class="absolute right-0 top-full mt-1 w-80 max-w-[calc(100vw-1rem)] bg-slate-800 border border-slate-700
+                      rounded-xl shadow-2xl overflow-hidden z-50">
+            <template x-if="notifCounts.total === 0">
+              <div class="px-4 py-6 text-center text-slate-500 text-sm">No notifications</div>
+            </template>
+
+            <!-- Red / Critical -->
+            <template x-if="notifications.red.length > 0">
+              <div class="border-b border-slate-700 last:border-0">
+                <div class="flex items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <span class="w-1.5 h-1.5 rounded-full bg-red-500 flex-shrink-0"></span>
+                  Critical
+                </div>
+                <template x-for="n in notifications.red" :key="n.id">
+                  <a class="block px-3 py-2 hover:bg-slate-700 transition-colors cursor-pointer" :href="n.link || '#'" @click="notifOpen = false">
+                    <div class="text-red-400 text-xs font-semibold" x-text="n.message"></div>
+                    <div class="text-slate-500 text-xs mt-0.5" x-show="n.detail" x-text="n.detail"></div>
+                  </a>
+                </template>
+              </div>
+            </template>
+
+            <!-- Yellow / Warnings -->
+            <template x-if="notifications.yellow.length > 0">
+              <div class="border-b border-slate-700 last:border-0">
+                <div class="flex items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <span class="w-1.5 h-1.5 rounded-full bg-yellow-400 flex-shrink-0"></span>
+                  Warnings
+                </div>
+                <template x-for="n in notifications.yellow" :key="n.id">
+                  <a class="block px-3 py-2 hover:bg-slate-700 transition-colors cursor-pointer" :href="n.link || '#'" @click="notifOpen = false">
+                    <div class="text-yellow-400 text-xs font-semibold" x-text="n.message"></div>
+                    <div class="text-slate-500 text-xs mt-0.5" x-show="n.detail" x-text="n.detail"></div>
+                  </a>
+                </template>
+              </div>
+            </template>
+
+            <!-- Green / Info -->
+            <template x-if="notifications.green.length > 0">
+              <div>
+                <div class="flex items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <span class="w-1.5 h-1.5 rounded-full bg-green-400 flex-shrink-0"></span>
+                  Info
+                </div>
+                <template x-for="n in notifications.green" :key="n.id">
+                  <a class="block px-3 py-2 hover:bg-slate-700 transition-colors cursor-pointer" :href="n.link || '#'" @click="notifOpen = false">
+                    <div class="text-green-400 text-xs font-semibold" x-text="n.message"></div>
+                    <div class="text-slate-500 text-xs mt-0.5" x-show="n.detail" x-text="n.detail"></div>
+                  </a>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
       </div>
     </header>
 
+    <!-- Auto-Update Banner (compact strip, shown when update detected but popup dismissed) -->
+    <div x-data="updateBanner()" x-init="checkForUpdates()">
+      <div x-show="show && !showCountdown" x-cloak x-transition
+           class="flex flex-col border-b border-slate-800 px-4 sm:px-6 py-2 text-sm flex-shrink-0"
+           :class="{
+             'bg-yellow-900/10 border-yellow-600/30': hasLocalChanges && !hasRemoteUpdate,
+             'bg-blue-900/10 border-blue-600/30': !hasLocalChanges && hasRemoteUpdate,
+             'bg-purple-900/10 border-purple-600/30': hasLocalChanges && hasRemoteUpdate,
+           }">
+        <div class="flex items-center gap-3">
+          <button x-show="!restarting" @click="startCountdown()"
+                  class="flex-shrink-0 px-3 py-1 rounded-md text-xs font-semibold text-slate-900 transition-colors"
+                  :class="{
+                    'bg-yellow-400 hover:bg-yellow-300': hasLocalChanges && !hasRemoteUpdate,
+                    'bg-blue-400 hover:bg-blue-300': !hasLocalChanges && hasRemoteUpdate,
+                    'bg-purple-400 hover:bg-purple-300': hasLocalChanges && hasRemoteUpdate,
+                  }"
+                  x-text="buttonLabel"></button>
+          <strong x-show="!restarting" class="font-semibold"
+                  :class="{
+                    'text-yellow-400': hasLocalChanges && !hasRemoteUpdate,
+                    'text-blue-400': !hasLocalChanges && hasRemoteUpdate,
+                    'text-purple-400': hasLocalChanges && hasRemoteUpdate,
+                  }"
+                  x-text="message"></strong>
+          <span x-show="detail && !restarting" class="text-slate-500 text-xs" x-text="detail"></span>
+          <button x-show="!restarting" @click="dismiss()"
+                  class="ml-auto text-slate-500 hover:text-slate-300 transition-colors text-lg leading-none"
+                  title="Dismiss">&times;</button>
+        </div>
+        <div x-show="changedFiles.length > 0 && showFiles" class="mt-2 space-y-0.5 text-xs">
+          <template x-for="f in changedFiles" :key="f">
+            <div class="text-slate-500">
+              <span class="text-yellow-400">M</span> <span x-text="f"></span>
+            </div>
+          </template>
+        </div>
+        <button x-show="changedFiles.length > 0 && !restarting" @click="showFiles = !showFiles"
+                class="text-left text-slate-500 hover:text-slate-400 text-xs mt-1 transition-colors"
+                x-text="showFiles ? 'Hide files' : changedFiles.length + ' changed file(s) — click to show'">
+        </button>
+      </div>
+
+      <!-- Countdown modal overlay -->
+      <div x-show="showCountdown" x-cloak x-transition
+           class="fixed inset-0 z-[9000] bg-black/60 flex items-center justify-center p-4"
+           @click.self="cancelCountdown()">
+        <div class="bg-slate-800 border border-slate-700 rounded-xl p-8 w-full max-w-md text-center shadow-2xl"
+             @click.stop>
+          <div class="text-4xl mb-3">&#128260;</div>
+          <h2 class="text-lg font-semibold mb-2"
+              :class="{
+                'text-yellow-400': hasLocalChanges && !hasRemoteUpdate,
+                'text-blue-400': !hasLocalChanges && hasRemoteUpdate,
+                'text-purple-400': hasLocalChanges && hasRemoteUpdate,
+              }"
+              x-text="message"></h2>
+          <p class="text-slate-400 text-sm mb-4" x-text="detail"></p>
+
+          <!-- Changed files list -->
+          <div x-show="changedFiles.length > 0"
+               class="mb-4 text-left text-xs max-h-28 overflow-y-auto bg-slate-900 rounded-lg p-3 space-y-0.5">
+            <template x-for="f in changedFiles" :key="f">
+              <div class="text-slate-500">
+                <span class="text-yellow-400">M</span> <span x-text="f"></span>
+              </div>
+            </template>
+          </div>
+
+          <!-- Countdown SVG ring -->
+          <div class="relative mx-auto w-20 h-20 mb-4">
+            <svg width="80" height="80" viewBox="0 0 80 80" class="w-full h-full">
+              <circle cx="40" cy="40" r="34" stroke="rgb(51 65 85)" stroke-width="4" fill="none"/>
+              <circle cx="40" cy="40" r="34" stroke="rgb(34 211 238)" stroke-width="4" fill="none"
+                      stroke-dasharray="213.6"
+                      :stroke-dashoffset="213.6 * (1 - countdown / 10)"
+                      stroke-linecap="round"
+                      transform="rotate(-90 40 40)"
+                      class="countdown-ring-fill"/>
+            </svg>
+            <div class="absolute inset-0 flex items-center justify-center text-2xl font-bold text-cyan-400"
+                 x-text="countdown"></div>
+          </div>
+
+          <p class="text-slate-500 text-sm mb-6">
+            Restarting in <span x-text="countdown"></span> second<span x-show="countdown !== 1">s</span>...
+          </p>
+
+          <div class="flex gap-3 justify-center">
+            <button @click="doRestart()"
+                    class="px-6 py-2 bg-green-500 hover:bg-green-400 text-slate-900 font-semibold rounded-lg transition-colors">
+              Restart Now
+            </button>
+            <button @click="cancelCountdown()"
+                    class="px-6 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg border border-slate-600 transition-colors">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Page content -->
-    <main class="flex-1 overflow-y-auto p-6">
+    <main class="flex-1 overflow-y-auto p-4 sm:p-6">
       {% block content %}{% endblock %}
     </main>
 
@@ -234,6 +708,44 @@
     </footer>
   </div>
 
+</div><!-- /flex h-full -->
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     Task Switcher Overlay (Tab key)
+══════════════════════════════════════════════════════════════════════ -->
+<div x-data x-show="$store.shell && $store.shell.showTaskSwitcher"
+     x-cloak
+     class="fixed inset-0 z-[8000] bg-black/60 flex items-start justify-center pt-[8vh] p-4"
+     @click.self="$store.shell.showTaskSwitcher = false">
+</div>
+
+<!-- Task switcher panel (rendered inside appShell scope) -->
+<template x-teleport="body">
+  <div x-data x-show="document.body._x_dataStack?.[0]?.showTaskSwitcher ?? false" x-cloak>
+    <!-- This approach requires the switcher to live in the appShell scope. Handled via the inline template below. -->
+  </div>
+</template>
+
+<!-- Restart overlay (covers entire page during server restart) -->
+<div id="restart-overlay"
+     style="display:none;"
+     class="fixed inset-0 z-[10000] bg-slate-950 flex-col items-center justify-center gap-4">
+  <div class="text-blue-400 text-xl font-bold">{{ app_name }}</div>
+  <div id="restart-msg" class="text-slate-400 text-base">Restarting</div>
+  <div class="mt-2">
+    <svg width="28" height="28" viewBox="0 0 28 28" class="restart-spinner">
+      <circle cx="14" cy="14" r="11" stroke="rgb(51 65 85)" stroke-width="3" fill="none"/>
+      <circle cx="14" cy="14" r="11" stroke="rgb(96 165 250)" stroke-width="3" fill="none"
+              stroke-dasharray="50 70" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <div id="restart-status" class="text-slate-600 text-xs mt-1"></div>
+</div>
+
+<!-- Global toast container (bottom-right) -->
+<div id="toast-container"
+     class="fixed bottom-4 right-4 z-[10000] flex flex-col gap-2 pointer-events-none
+            w-80 max-w-[calc(100vw-2rem)]">
 </div>
 
 <script src="/static/js/main.js"></script>
@@ -241,9 +753,242 @@
 {% block scripts %}{% endblock %}
 
 <script>
+/* ══════════════════════════════════════════════════════════════
+   appShell() — main Alpine component for the shell layout.
+   Extends the existing sidebarOpen with:
+     1. Server status indicator state
+     2. Task switcher state + polling
+     3. Notification bell state + polling
+     4. Mobile sidebar state
+══════════════════════════════════════════════════════════════ */
 function appShell() {
   return {
+    // ── Sidebar ──────────────────────────────────────────────
     sidebarOpen: true,
+    mobileView: false,
+
+    // ── Server status ─────────────────────────────────────────
+    serverOk: false,
+    showServerPopup: false,
+    serverVersion: '',
+    serverBuildTs: '',
+    serverPython: '',
+    serverDb: '',
+    gitBranch: null,
+    gitCommit: null,
+    gitDirty: false,
+
+    // ── Task switcher ─────────────────────────────────────────
+    showTaskSwitcher: false,
+    taskTotal: 0,
+    taskRunning: 0,
+    taskFailed: 0,
+    taskPending: 0,
+    taskStale: 0,
+    taskList: [],
+    _taskPollTimer: null,
+
+    // ── Notifications ─────────────────────────────────────────
+    notifOpen: false,
+    notifLoaded: false,
+    notifications: { red: [], yellow: [], green: [] },
+    notifCounts: { red: 0, yellow: 0, green: 0, total: 0 },
+
+    // ── Computed ──────────────────────────────────────────────
+    get taskBadgeTitle() {
+      const parts = [];
+      if (this.taskRunning > 0) parts.push(this.taskRunning + ' running');
+      if (this.taskFailed > 0) parts.push(this.taskFailed + ' failed');
+      if (this.taskPending > 0) parts.push(this.taskPending + ' pending');
+      if (this.taskStale > 0) parts.push(this.taskStale + ' finished');
+      return parts.length ? parts.join(', ') + ' — press Tab' : 'No tasks — press Tab';
+    },
+
+    // ── Init ─────────────────────────────────────────────────
+    async init() {
+      // Detect mobile
+      this._checkMobile();
+      window.addEventListener('resize', () => this._checkMobile());
+
+      // On mobile start with sidebar closed
+      if (this.mobileView) this.sidebarOpen = false;
+
+      // Load server status
+      await Promise.allSettled([
+        this._loadHealth(),
+        this._loadVersion(),
+      ]);
+
+      // Load notifications
+      await this.pollNotifications();
+      this._scheduleNotifPoll();
+
+      // Load task summary
+      await this.pollTasks();
+      this._scheduleTaskPoll();
+
+      // Global keyboard shortcuts
+      document.addEventListener('keydown', (e) => {
+        // Tab outside inputs = task switcher toggle
+        if (e.key === 'Tab' && !e.target.closest('input, textarea, select, [contenteditable]')) {
+          e.preventDefault();
+          this.showTaskSwitcher = !this.showTaskSwitcher;
+          if (this.showTaskSwitcher) this.loadTaskList();
+        }
+        // Escape = close task switcher
+        if (e.key === 'Escape' && this.showTaskSwitcher) {
+          this.showTaskSwitcher = false;
+        }
+      });
+    },
+
+    _checkMobile() {
+      this.mobileView = window.innerWidth < 1024; // lg breakpoint
+      if (!this.mobileView) this.sidebarOpen = true;
+    },
+
+    async _loadHealth() {
+      try {
+        const r = await fetch('/health');
+        if (r.ok) {
+          const d = await r.json();
+          this.serverOk = d.status === 'ok';
+          this.serverDb = d.database || 'unknown';
+          this.serverPython = d.python_version || '';
+        }
+      } catch (e) { this.serverOk = false; }
+    },
+
+    async _loadVersion() {
+      try {
+        const r = await fetch('/api/v1/admin/version');
+        if (r.ok) {
+          const d = await r.json();
+          this.serverVersion = d.version || '';
+          this.gitBranch = d.git_branch || null;
+          this.gitCommit = d.git_commit || null;
+          this.gitDirty = d.git_dirty || false;
+          if (d.build_ts) {
+            try {
+              this.serverBuildTs = new Date(d.build_ts).toLocaleString();
+            } catch (_) { this.serverBuildTs = d.build_ts; }
+          }
+        }
+      } catch (e) {}
+    },
+
+    // ── Notifications ─────────────────────────────────────────
+    async pollNotifications() {
+      try {
+        const r = await fetch('/api/v1/notifications');
+        if (r.ok) {
+          const d = await r.json();
+          this.notifications = {
+            red:    d.red    || [],
+            yellow: d.yellow || [],
+            green:  d.green  || [],
+          };
+          this.notifCounts = d.counts || { red: 0, yellow: 0, green: 0, total: 0 };
+          this.notifLoaded = true;
+        }
+      } catch (e) {}
+    },
+
+    _scheduleNotifPoll() {
+      setTimeout(async () => {
+        await this.pollNotifications();
+        this._scheduleNotifPoll();
+      }, 60000);
+    },
+
+    // ── Tasks ─────────────────────────────────────────────────
+    async pollTasks() {
+      try {
+        const r = await fetch('/api/v1/tasks/summary');
+        if (r.ok) {
+          const d = await r.json();
+          this.taskRunning = d.running || 0;
+          this.taskFailed  = d.failed  || 0;
+          this.taskPending = d.pending || 0;
+          this.taskStale   = (d.completed || 0) + (d.cancelled || 0);
+          this.taskTotal   = d.total   || 0;
+        }
+      } catch (e) {}
+    },
+
+    _scheduleTaskPoll() {
+      const interval = (this.taskRunning > 0 || this.taskPending > 0) ? 5000 : 30000;
+      this._taskPollTimer = setTimeout(async () => {
+        await this.pollTasks();
+        this._scheduleTaskPoll();
+      }, interval);
+    },
+
+    async loadTaskList() {
+      try {
+        const r = await fetch('/api/v1/tasks');
+        if (r.ok) {
+          const d = await r.json();
+          this.taskList = d.tasks || [];
+        }
+      } catch (e) {}
+    },
+
+    async cancelTask(taskId) {
+      try {
+        await fetch('/api/v1/tasks/' + taskId + '/cancel', { method: 'POST' });
+        await this.loadTaskList();
+        await this.pollTasks();
+      } catch (e) {}
+    },
+
+    async deleteTask(taskId) {
+      if (!confirm('Delete this task?')) return;
+      try {
+        await fetch('/api/v1/tasks/' + taskId, { method: 'DELETE' });
+        await this.loadTaskList();
+        await this.pollTasks();
+      } catch (e) {}
+    },
+
+    async clearFinishedTasks() {
+      if (!confirm('Remove all finished tasks?')) return;
+      try {
+        await fetch('/api/v1/tasks/clear-finished', { method: 'POST' });
+        await this.loadTaskList();
+        await this.pollTasks();
+      } catch (e) {}
+    },
+
+    async viewTask(taskId) {
+      this.showTaskSwitcher = false;
+      window.location.href = '/tasks?task=' + taskId;
+    },
+
+    taskStatusColor(status) {
+      const map = {
+        running:   'text-green-400',
+        failed:    'text-red-400',
+        pending:   'text-yellow-400',
+        completed: 'text-slate-500',
+        cancelled: 'text-slate-500',
+      };
+      return map[status] || 'text-slate-500';
+    },
+
+    taskStatusIcon(status) {
+      const map = { running: '●', failed: '✗', pending: '◷', completed: '✓', cancelled: '—' };
+      return map[status] || '?';
+    },
+
+    taskElapsed(task) {
+      const start = task.started_at || task.created_at;
+      if (!start) return '';
+      const end = task.completed_at || new Date().toISOString();
+      const s = Math.floor((new Date(end) - new Date(start)) / 1000);
+      if (s < 60) return s + 's';
+      return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    },
   };
 }
 
@@ -253,15 +998,417 @@ function tenantSelector() {
     current: '{{ slug | default("Select tenant") }}',
   };
 }
+
+/* ══════════════════════════════════════════════════════════════
+   updateBanner() — polls /api/v1/admin/update-check every 30s.
+   On detection: plays ding, shows countdown modal, auto-restarts.
+══════════════════════════════════════════════════════════════ */
+function updateBanner() {
+  return {
+    show: false,
+    showCountdown: false,
+    countdown: 10,
+    countdownTimer: null,
+    dismissed: false,
+    message: '',
+    detail: '',
+    buttonLabel: 'Restart',
+    changedFiles: [],
+    showFiles: false,
+    restarting: false,
+    hasLocalChanges: false,
+    hasRemoteUpdate: false,
+    checkInterval: null,
+    _dinged: false,
+
+    _playDing() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc  = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880,    ctx.currentTime);        // A5
+        osc.frequency.setValueAtTime(1108.7, ctx.currentTime + 0.08); // C#6
+        osc.frequency.setValueAtTime(1318.5, ctx.currentTime + 0.16); // E6
+        gain.gain.setValueAtTime(0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.5);
+      } catch (e) { /* audio not available */ }
+    },
+
+    async checkForUpdates() {
+      // Initial check after 3s, then every 30s
+      setTimeout(() => this._doCheck(), 3000);
+      this.checkInterval = setInterval(() => this._doCheck(), 30000);
+    },
+
+    async _doCheck() {
+      if (this.showCountdown || this.restarting) return;
+      try {
+        const r = await fetch('/api/v1/admin/update-check');
+        if (!r.ok) return;
+        const data = await r.json();
+
+        this.hasLocalChanges = data.local_changes;
+        this.hasRemoteUpdate = data.remote_update;
+        this.changedFiles    = data.local_changed_files || [];
+
+        if (data.local_changes && data.remote_update) {
+          this.message     = 'Code updated + remote commits available';
+          this.detail      = (data.commits_behind || 0) + ' commit(s) behind';
+          this.buttonLabel = 'Pull & Restart';
+        } else if (data.local_changes) {
+          this.message     = 'Code changed — restart to apply';
+          this.detail      = (this.changedFiles.length) + ' file(s) modified since server started';
+          this.buttonLabel = 'Restart';
+        } else if (data.remote_update) {
+          this.message     = 'Remote update available';
+          this.detail      = (data.commits_behind || 0) + ' commit(s)';
+          this.buttonLabel = 'Pull & Restart';
+        }
+
+        const wasShowing = this.show;
+        this.show = data.update_available && !this.dismissed;
+
+        // First detection: ding + auto-show countdown
+        if (data.update_available && !wasShowing && !this.dismissed) {
+          this._playDing();
+          this._dinged = true;
+          this.startCountdown();
+        }
+      } catch (e) {}
+    },
+
+    startCountdown() {
+      this.showCountdown = true;
+      this.countdown = 10;
+      if (this.countdownTimer) clearInterval(this.countdownTimer);
+      this.countdownTimer = setInterval(() => {
+        this.countdown--;
+        if (this.countdown <= 0) {
+          clearInterval(this.countdownTimer);
+          this.countdownTimer = null;
+          this.doRestart();
+        }
+      }, 1000);
+    },
+
+    cancelCountdown() {
+      if (this.countdownTimer) clearInterval(this.countdownTimer);
+      this.countdownTimer = null;
+      this.showCountdown = false;
+      this.show = true;
+    },
+
+    dismiss() {
+      this.show = false;
+      this.dismissed = true;
+      this._dinged = false;
+      // Re-enable after 5 minutes
+      setTimeout(() => { this.dismissed = false; this._dinged = false; }, 300000);
+    },
+
+    async doRestart() {
+      if (this.countdownTimer) clearInterval(this.countdownTimer);
+      this.countdownTimer = null;
+      this.showCountdown = false;
+      this.restarting = true;
+      this.show = false;
+      this.showFiles = false;
+      if (this.checkInterval) clearInterval(this.checkInterval);
+
+      // Capture current boot_ts so we know when the new server is up
+      let oldBootTs = 0;
+      try {
+        const h = await fetch('/health');
+        if (h.ok) { const hd = await h.json(); oldBootTs = hd.boot_ts || 0; }
+      } catch (e) {}
+
+      // Show restart overlay
+      const overlay = document.getElementById('restart-overlay');
+      const msg     = document.getElementById('restart-msg');
+      const status  = document.getElementById('restart-status');
+      if (overlay) { overlay.style.display = 'flex'; }
+      if (msg)     msg.textContent = this.hasRemoteUpdate ? 'Pulling updates and restarting...' : 'Restarting...';
+      if (status)  status.textContent = 'Sending restart signal...';
+
+      // Send restart signal
+      const endpoint = this.hasRemoteUpdate ? '/api/v1/admin/restart' : '/api/v1/admin/restart-only';
+      try { await fetch(endpoint, { method: 'POST' }); } catch (e) {}
+
+      // Poll for new server
+      if (status) status.textContent = 'Waiting for server to come back...';
+      const maxAttempts = 60;
+      let newServerUp = false;
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          const r = await fetch('/health');
+          if (r.ok) {
+            const d = await r.json();
+            const newBootTs = d.boot_ts || 0;
+            if (newBootTs > 0 && newBootTs !== oldBootTs) {
+              newServerUp = true;
+              break;
+            }
+            if (status) status.textContent = 'Old server still shutting down...';
+          }
+        } catch (e) {
+          if (status) status.textContent = 'Server is restarting...';
+        }
+      }
+
+      if (newServerUp) {
+        if (msg)    msg.textContent    = 'Almost ready';
+        if (status) status.textContent = 'Warming up...';
+        const warmupUrls = ['/', '/api/v1/admin/version', '/api/v1/tasks/summary'];
+        await Promise.allSettled(warmupUrls.map(u => fetch(u)));
+        sessionStorage.setItem('app_restarting', '1');
+        if (status) status.textContent = 'Reloading...';
+        if (msg)    msg.textContent    = 'Ready';
+        await new Promise(r => setTimeout(r, 200));
+        window.location.href = '/';
+        return;
+      }
+
+      if (msg)    msg.textContent    = 'Restart may have failed';
+      if (status) status.textContent = 'Try refreshing the page manually (F5)';
+      const btn = document.createElement('button');
+      btn.textContent = 'Refresh Now';
+      btn.className = 'mt-4 px-6 py-2 bg-slate-700 text-slate-200 rounded-lg border border-slate-600 cursor-pointer text-sm';
+      btn.onclick = () => window.location.reload();
+      if (overlay) overlay.appendChild(btn);
+    },
+  };
+}
+</script>
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     Task Switcher Overlay — rendered inside the appShell scope
+     (We wrap this in an outer div that picks up the appShell x-data context
+     by being a sibling inside the same body scope. Alpine automatically
+     inherits scope from the nearest ancestor x-data — here, the body-level
+     appShell if we place the overlay as a child of the flex div, or we
+     re-connect via a global function. Since the flex#shell div already has
+     x-data="appShell()", we place the task switcher *after* the main structure
+     and use a standalone component that reads from the shell's state via a
+     shared Alpine store. Instead, the simplest pattern is to inline it.)
+
+     Note: The overlay is declared here, outside the main flex container,
+     but uses x-data="" (empty — no new scope) so it references the global
+     scope. The appShell state is accessed via $data on the flex shell el.
+     For simplicity we use a self-contained Alpine component that mirrors
+     the appShell task state.
+══════════════════════════════════════════════════════════════════════ -->
+
+<!-- Task Switcher: standalone component, communicates via custom events -->
+<div x-data="taskSwitcherPanel()"
+     @open-task-switcher.window="open = true; loadList()"
+     @close-task-switcher.window="open = false">
+
+  <div x-show="open" x-cloak x-transition
+       class="fixed inset-0 z-[8000] bg-black/60 flex items-start justify-center pt-[8vh] px-4 pb-4"
+       @click.self="open = false">
+    <div class="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-xl max-h-[80vh]
+                overflow-hidden flex flex-col shadow-2xl"
+         @click.stop>
+
+      <!-- Header -->
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-700 flex-shrink-0">
+        <h2 class="text-sm font-semibold text-slate-100">Task Switcher</h2>
+        <div class="flex items-center gap-2">
+          <button x-show="staleCount > 0"
+                  @click="clearFinished()"
+                  class="px-2.5 py-1 text-xs text-slate-400 hover:text-slate-200 border border-slate-700
+                         hover:border-slate-500 rounded-md transition-colors">
+            Clear finished
+          </button>
+          <button @click="open = false" title="Close (Esc)"
+                  class="text-slate-500 hover:text-slate-200 transition-colors text-xl leading-none px-1">&times;</button>
+        </div>
+      </div>
+
+      <!-- Body -->
+      <div class="flex-1 overflow-y-auto">
+        <template x-if="taskList.length === 0">
+          <div class="text-center py-10 text-slate-500 text-sm">
+            No tasks yet. Tasks will appear here when you start one.
+          </div>
+        </template>
+
+        <template x-for="t in taskList" :key="t.id">
+          <div class="flex items-center gap-3 px-5 py-3 border-b border-slate-700/50 last:border-0
+                      hover:bg-slate-700/40 transition-colors cursor-pointer"
+               @click="viewTask(t.id)">
+
+            <!-- Status icon / spinner -->
+            <div class="w-5 flex-shrink-0 text-center text-sm" :class="taskStatusColor(t.status)">
+              <template x-if="t.status === 'running'">
+                <span class="task-spinner"></span>
+              </template>
+              <template x-if="t.status !== 'running'">
+                <span x-text="taskStatusIcon(t.status)"></span>
+              </template>
+            </div>
+
+            <!-- Info -->
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium text-slate-200 truncate" x-text="t.name || t.task_type || 'Task'"></div>
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-0.5">
+                <span class="text-xs" :class="taskStatusColor(t.status)" x-text="t.status"></span>
+                <span class="text-xs text-slate-500" x-text="t.task_type" x-show="t.task_type"></span>
+                <span class="text-xs text-slate-500" x-text="taskElapsed(t)" x-show="taskElapsed(t)"></span>
+                <span class="text-xs text-slate-500" x-show="t.progress > 0 && t.progress < 100"
+                      x-text="t.progress + '%'"></span>
+              </div>
+            </div>
+
+            <!-- Progress bar (running only) -->
+            <template x-if="t.status === 'running'">
+              <div class="w-14 h-1.5 bg-slate-700 rounded-full overflow-hidden flex-shrink-0">
+                <div class="h-full bg-green-500 rounded-full transition-all duration-300"
+                     :style="'width:' + (t.progress || 0) + '%'"></div>
+              </div>
+            </template>
+
+            <!-- Action buttons -->
+            <div class="flex items-center gap-1.5 flex-shrink-0" @click.stop>
+              <template x-if="t.status === 'running'">
+                <button @click="cancelTask(t.id)"
+                        class="px-2 py-0.5 text-xs text-red-400 border border-transparent hover:border-red-600/50
+                               hover:bg-red-900/30 rounded transition-colors">
+                  Cancel
+                </button>
+              </template>
+              <template x-if="t.status === 'failed' || t.status === 'completed' || t.status === 'cancelled'">
+                <button @click="deleteTask(t.id)"
+                        class="px-2 py-0.5 text-xs text-red-400 border border-transparent hover:border-red-600/50
+                               hover:bg-red-900/30 rounded transition-colors">
+                  Remove
+                </button>
+              </template>
+              <button @click="viewTask(t.id)"
+                      class="px-2 py-0.5 text-xs text-slate-400 border border-slate-600 hover:border-slate-500
+                             hover:text-slate-200 rounded transition-colors">
+                View
+              </button>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- Footer -->
+      <div class="px-5 py-3 border-t border-slate-700 flex items-center justify-between flex-shrink-0">
+        <span class="text-xs text-slate-500">
+          Press <kbd class="px-1 py-0.5 bg-slate-700 border border-slate-600 rounded text-[0.6rem] font-mono">Tab</kbd>
+          or <kbd class="px-1 py-0.5 bg-slate-700 border border-slate-600 rounded text-[0.6rem] font-mono">Esc</kbd> to close
+        </span>
+        <a href="/tasks" class="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+           @click="open = false">Open Tasks page</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════
+   taskSwitcherPanel() — standalone Alpine component.
+   Listens for global Tab key and custom events to open/close.
+   Mirrors task-related methods from appShell for independence.
+══════════════════════════════════════════════════════════════ */
+function taskSwitcherPanel() {
+  return {
+    open: false,
+    taskList: [],
+    staleCount: 0,
+
+    init() {
+      // Listen for Tab key globally
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Tab' && !e.target.closest('input, textarea, select, [contenteditable]')) {
+          e.preventDefault();
+          this.open = !this.open;
+          if (this.open) this.loadList();
+        }
+        if (e.key === 'Escape' && this.open) {
+          this.open = false;
+        }
+      });
+    },
+
+    async loadList() {
+      try {
+        const r = await fetch('/api/v1/tasks');
+        if (r.ok) {
+          const d = await r.json();
+          this.taskList = d.tasks || [];
+          this.staleCount = this.taskList.filter(t =>
+            t.status === 'completed' || t.status === 'cancelled'
+          ).length;
+        }
+      } catch (e) {}
+    },
+
+    async cancelTask(id) {
+      try {
+        await fetch('/api/v1/tasks/' + id + '/cancel', { method: 'POST' });
+        await this.loadList();
+      } catch (e) {}
+    },
+
+    async deleteTask(id) {
+      if (!confirm('Delete this task?')) return;
+      try {
+        await fetch('/api/v1/tasks/' + id, { method: 'DELETE' });
+        await this.loadList();
+      } catch (e) {}
+    },
+
+    async clearFinished() {
+      if (!confirm('Remove all finished tasks?')) return;
+      try {
+        await fetch('/api/v1/tasks/clear-finished', { method: 'POST' });
+        await this.loadList();
+      } catch (e) {}
+    },
+
+    viewTask(id) {
+      this.open = false;
+      window.location.href = '/tasks?task=' + id;
+    },
+
+    taskStatusColor(status) {
+      const map = {
+        running:   'text-green-400',
+        failed:    'text-red-400',
+        pending:   'text-yellow-400',
+        completed: 'text-slate-500',
+        cancelled: 'text-slate-500',
+      };
+      return map[status] || 'text-slate-500';
+    },
+
+    taskStatusIcon(status) {
+      const map = { running: '●', failed: '✗', pending: '◷', completed: '✓', cancelled: '—' };
+      return map[status] || '?';
+    },
+
+    taskElapsed(task) {
+      const start = task.started_at || task.created_at;
+      if (!start) return '';
+      const end = task.completed_at || new Date().toISOString();
+      const s = Math.floor((new Date(end) - new Date(start)) / 1000);
+      if (s < 60) return s + 's';
+      return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    },
+  };
+}
 </script>
 
 {% include "partials/command_palette.html" %}
-
-<!-- Global toast container -->
-<div id="toast-container"
-     class="fixed top-4 right-4 z-[10000] flex flex-col gap-2 pointer-events-none
-            w-80 max-w-[calc(100vw-2rem)]">
-</div>
 
 </body>
 </html>

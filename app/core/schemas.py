@@ -70,6 +70,10 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str
     environment: str
+    python_version: str = ""
+    database: str = "unknown"
+    db_ok: bool = True
+    boot_ts: float = 0.0
 
 
 class TimestampSchema(BaseModel):

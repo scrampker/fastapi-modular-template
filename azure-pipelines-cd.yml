@@ -1,0 +1,99 @@
+# ---------------------------------------------------------------------------
+# CD Pipeline — Deploy to Dev (auto), Test (manual approval), Prod (manual approval).
+# Triggered automatically after the CI pipeline completes on master.
+#
+# Required configuration (update these variables before use):
+#   azureServiceConnection  — ADO ARM service connection for your Azure subscription
+#   acrLoginServer          — Full ACR login server (e.g. mycompanyacr.azurecr.io)
+#   imageName               — Docker image name matching the CI pipeline
+#
+# Environment approval gates:
+#   Configure manual approval gates in Azure DevOps under:
+#   Pipelines → Environments → <environment name> → Approvals and checks
+# ---------------------------------------------------------------------------
+
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: ci
+      source: 'YOUR_CI_PIPELINE_NAME'      # must match the CI pipeline name in ADO
+      trigger:
+        branches:
+          include:
+            - master
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - name: azureServiceConnection
+    value: 'YOUR_ARM_SERVICE_CONNECTION'   # ADO ARM service connection — configure in project settings
+  - name: acrLoginServer
+    value: 'YOUR_ACR_LOGIN_SERVER'         # e.g. mycompanyacr.azurecr.io
+  - name: imageName
+    value: 'YOUR_IMAGE_NAME'               # must match CI pipeline imageName
+  - name: imageTag
+    value: '$(resources.pipeline.ci.runID)'
+
+# ---- Dev (automatic) -------------------------------------------------------
+stages:
+  - stage: DeployDev
+    displayName: 'Deploy to Dev'
+    jobs:
+      - deployment: DeployDev
+        displayName: 'Deploy Container App — Dev'
+        environment: 'myapp-dev'           # no approval gate; deploys automatically
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureContainerApps@1
+                  displayName: 'Deploy to Container Apps (dev)'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    containerAppName: 'ca-myapp-dev'
+                    resourceGroup: 'rg-myapp-dev'
+                    imageToDeploy: '$(acrLoginServer)/$(imageName):$(imageTag)'
+
+  # ---- Test (manual approval) -----------------------------------------------
+  - stage: DeployTest
+    displayName: 'Deploy to Test'
+    dependsOn: DeployDev
+    condition: succeeded()
+    jobs:
+      - deployment: DeployTest
+        displayName: 'Deploy Container App — Test'
+        environment: 'myapp-test'          # configure manual approval gate on this environment in ADO
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureContainerApps@1
+                  displayName: 'Deploy to Container Apps (test)'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    containerAppName: 'ca-myapp-test'
+                    resourceGroup: 'rg-myapp-test'
+                    imageToDeploy: '$(acrLoginServer)/$(imageName):$(imageTag)'
+
+  # ---- Prod (manual approval) ------------------------------------------------
+  - stage: DeployProd
+    displayName: 'Deploy to Prod'
+    dependsOn: DeployTest
+    condition: succeeded()
+    jobs:
+      - deployment: DeployProd
+        displayName: 'Deploy Container App — Prod'
+        environment: 'myapp-prod'          # configure manual approval gate on this environment in ADO
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureContainerApps@1
+                  displayName: 'Deploy to Container Apps (prod)'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    containerAppName: 'ca-myapp-prod'
+                    resourceGroup: 'rg-myapp-prod'
+                    imageToDeploy: '$(acrLoginServer)/$(imageName):$(imageTag)'

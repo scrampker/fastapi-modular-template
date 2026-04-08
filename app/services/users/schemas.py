@@ -29,6 +29,8 @@ class UserRead(BaseModel):
     display_name: str
     is_active: bool
     is_superadmin: bool
+    totp_enabled: bool = False
+    must_change_password: bool = False
     created_at: datetime
     last_login: datetime | None
 
