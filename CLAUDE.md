@@ -65,6 +65,41 @@ ScottyCore (you are here)
 **After building something generic in an app:**
 > "The file manager service I built in ScottyStrike should be extracted to core."
 
+## Pattern Tracking (Template-as-Suggestion Model)
+
+Each app is an honest, independent codebase — not a thin wrapper around a shared library. ScottyCore is a *suggestion* and a reference implementation; apps adopt patterns selectively. To keep this from drifting into chaos, files in scottycore that are intended to be propagated carry inline markers:
+
+```python
+# scottycore-pattern: auth.session_version
+```
+
+When an app adopts a pattern, its copy of the file carries the same marker plus a synced-from line:
+
+```python
+# scottycore-pattern: auth.session_version
+# scottycore-synced-from: a1b2c3d4
+```
+
+Each app can also drop a `.scottycore-patterns.yaml` manifest at its root to declare which patterns it has adopted vs. explicitly opted out of:
+
+```yaml
+adopted:
+  - auth.session_version
+  - settings.kv_hierarchy
+ignored:
+  - audit.phi_data_access  # this app handles no PHI
+```
+
+The sync watcher reads this manifest and skips fixes for ignored patterns. The `.scottycore-patterns.yaml.example` file in the scottycore root has the full template.
+
+**Drift report:**
+```bash
+python3 scripts/sync-watcher.py --drift-report           # print to stdout
+python3 scripts/sync-watcher.py --drift-report --write   # save to data/drift-reports/
+```
+
+A weekly cron writes a fresh drift report every Monday at 09:00.
+
 ## Architecture: Contract-First Modular Service Layer
 
 Every module communicates through typed service interfaces (Pydantic schemas in, Pydantic schemas out). No module imports another module's ORM models or writes queries against another module's tables.

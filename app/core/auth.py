@@ -1,4 +1,6 @@
 """Unified authentication resolver.
+# scottycore-pattern: auth.unified_resolver
+# scottycore-pattern: auth.idle_timeout
 
 Priority order:
   1. Cloudflare Zero Trust header  (Cf-Access-Authenticated-User-Email)

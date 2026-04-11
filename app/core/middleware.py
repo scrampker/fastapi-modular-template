@@ -1,4 +1,5 @@
 """Security middleware and exception handlers."""
+# scottycore-pattern: middleware.security_headers
 
 from __future__ import annotations
 

@@ -1,4 +1,7 @@
 """Auth service — JWT token management, credential verification, and TOTP 2FA."""
+# scottycore-pattern: auth.session_version
+# scottycore-pattern: auth.lockout
+# scottycore-pattern: auth.totp
 
 from __future__ import annotations
 

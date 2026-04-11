@@ -17,12 +17,14 @@ Reports are written to /script/scottycore/data/sync-reports/
 Log tailed via sync-pane.sh in a tmux pane.
 
 Usage:
-    python3 sync-watcher.py                    # Normal run
-    python3 sync-watcher.py --dry-run          # Detect changes, don't invoke agent
-    python3 sync-watcher.py --force            # Re-baseline all repos
-    python3 sync-watcher.py --tail             # Tail reports (for tmux pane)
-    python3 sync-watcher.py --report-only      # Analyze but don't make changes
-    python3 sync-watcher.py --model sonnet     # Override model (default: opus)
+    python3 sync-watcher.py                            # Normal run
+    python3 sync-watcher.py --dry-run                  # Detect changes, don't invoke agent
+    python3 sync-watcher.py --force                    # Re-baseline all repos
+    python3 sync-watcher.py --tail                     # Tail reports (for tmux pane)
+    python3 sync-watcher.py --report-only              # Analyze but don't make changes
+    python3 sync-watcher.py --model sonnet             # Override model (default: opus)
+    python3 sync-watcher.py --drift-report             # Print pattern drift across repos
+    python3 sync-watcher.py --drift-report --write     # Write drift report to data/drift-reports/
 
 Env vars:
     SYNC_TMUX_TARGET    tmux pane for notifications (e.g. "main:0.1")
@@ -182,6 +184,29 @@ def get_diff(repo_path: str, since_sha: str, stat_only: bool = False) -> str:
     return result
 
 
+def read_manifest_for_repo(repo_path: str) -> dict:
+    """Load .scottycore-patterns.yaml from a repo (or return empty if missing)."""
+    manifest_path = Path(repo_path) / ".scottycore-patterns.yaml"
+    if not manifest_path.exists():
+        return {"adopted": [], "ignored": []}
+    adopted: list[str] = []
+    ignored: list[str] = []
+    current: list[str] | None = None
+    for line in manifest_path.read_text().splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s == "adopted:":
+            current = adopted; continue
+        if s == "ignored:":
+            current = ignored; continue
+        if s.startswith("- ") and current is not None:
+            value = s[2:].split("#", 1)[0].strip()
+            if value:
+                current.append(value)
+    return {"adopted": adopted, "ignored": ignored}
+
+
 def build_agent_prompt(source_repos: list[str], changes: dict, report_only: bool) -> str:
     """Build the full prompt for the Claude agent."""
 
@@ -213,7 +238,14 @@ Stack: {info['stack']}
     target_repos = []
     for name, config in REPOS.items():
         if name not in changes:
-            target_repos.append(f"- **{name}** (`{config['path']}`) — {config['stack']}, branch: `{config['branch']}`")
+            manifest = read_manifest_for_repo(config["path"])
+            adopted_str = (", ".join(manifest["adopted"]) or "(none declared)")
+            ignored_str = (", ".join(manifest["ignored"]) or "(none)")
+            target_repos.append(
+                f"- **{name}** (`{config['path']}`) — {config['stack']}, branch: `{config['branch']}`\n"
+                f"    - adopted patterns: {adopted_str}\n"
+                f"    - ignored patterns: {ignored_str}"
+            )
 
     if not target_repos:
         # All repos changed — each is both source and target for the others
@@ -243,6 +275,13 @@ You have full write access to all repos. When you identify a fix that should pro
 4. **Commit**: `git -C <repo_path> add -A && git -C <repo_path> commit -m "sync: <description> (from <source>)"`
 5. **Switch back**: `git -C <repo_path> checkout <default_branch>`
 {"6. **Auto-merge**: If the fix is low-risk (no schema changes, no API changes, pure bug fix), merge the sync branch into the default branch." if AUTO_MERGE else "6. **Leave the branch** for the user to review and merge."}
+
+PATTERN ADOPTION MANIFESTS:
+Each target repo above lists `adopted` and `ignored` patterns from its `.scottycore-patterns.yaml`.
+- If a fix relates to a pattern listed under that repo's `ignored:` list, **SKIP** that repo entirely for this fix and note it in the report.
+- If a fix relates to a pattern listed under `adopted:`, the repo expects the fix — apply it.
+- If a fix isn't tied to any tracked pattern, use your judgment as before.
+- Pattern markers in source files look like `# scottycore-pattern: <name>`. When you sync a fix into a target repo, also add a `# scottycore-synced-from: <commit-sha>` line so drift tracking stays accurate.
 
 CRITICAL RULES — VIOLATION OF THESE CAUSES INFINITE LOOPS:
 - **SOURCE REPOS ARE READ-ONLY**: The following repos triggered this run and MUST NOT be modified: {", ".join(f"`{r}` (`{changes[r]['path']}`)" for r in source_repos)}
@@ -409,11 +448,44 @@ def tail_reports():
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def run_drift_report(write_to_file: bool):
+    """Generate a pattern drift report across all repos."""
+    # Import here to avoid hard dep at module load
+    sys.path.insert(0, str(Path(__file__).parent))
+    import pattern_tracker
+
+    scottycore = Path("/script/scottycore")
+    apps = {
+        name: Path(cfg["path"])
+        for name, cfg in REPOS.items()
+        if name != "scottycore"
+    }
+    drift = pattern_tracker.compute_drift(scottycore, apps)
+    core_patterns = sorted({
+        occ.pattern for occ in pattern_tracker.scan_for_patterns(scottycore)
+    })
+    report = pattern_tracker.render_drift_report(drift, core_patterns)
+
+    if write_to_file:
+        out_dir = CORE_DIR / "data" / "drift-reports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / f"drift_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        out_file.write_text(report)
+        log(f"Drift report written: {out_file}")
+        notify_tmux(f"Drift report ready: {out_file.name}")
+    else:
+        print(report)
+
+
 def main():
     args = sys.argv[1:]
 
     if "--tail" in args:
         tail_reports()
+        return
+
+    if "--drift-report" in args:
+        run_drift_report(write_to_file="--write" in args)
         return
 
     dry_run = "--dry-run" in args

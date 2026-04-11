@@ -1,0 +1,26 @@
+# ScottyCore Pattern Adoption Manifest
+# ====================================
+# Copy this file to .scottycore-patterns.yaml in each app that consumes
+# patterns from scottycore. The sync watcher reads it to decide which
+# cross-app fixes to propagate to this app.
+#
+# Patterns not listed in either section are treated as "unknown" — the
+# drift report will show them but the agent won't auto-apply.
+
+# Patterns this app has intentionally adopted from scottycore.
+# The agent will keep these in sync on every scottycore update.
+adopted:
+  - auth.unified_resolver       # Cloudflare/Azure/JWT/API-key chain
+  - auth.session_version        # session_version JWT claim invalidation
+  - auth.idle_timeout           # JWT iat-based idle session timeout
+  - auth.lockout                # 5-failure / 15-min lockout
+  - auth.totp                   # TOTP 2FA + backup codes
+  - middleware.security_headers # HSTS, CSP, X-Frame-Options
+  - settings.kv_hierarchy       # 4-tier global → tenant → user settings
+  - audit.immutable_log         # SOC2 audit trail
+
+# Patterns this app has explicitly opted out of. The agent will skip
+# these even if scottycore updates them. Add a comment explaining why.
+ignored:
+  - audit.phi_data_access       # this app handles no PHI
+  - settings.layout_passthrough # custom settings UI, no schema renderer
