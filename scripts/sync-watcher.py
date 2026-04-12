@@ -57,7 +57,7 @@ REPOS = {
     "scottyscribe": {
         "path": "/script/scottyscribe",
         "stack": "Flask + WhisperX + GPU",
-        "branch": "main",
+        "branch": "master",
     },
     "scottyscan": {
         "path": "/script/ScottyScan",
