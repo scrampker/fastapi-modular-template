@@ -14,7 +14,7 @@
   <aside class="w-44 flex-shrink-0">
     <nav class="space-y-0.5">
       <template x-for="section in sections" :key="section.id">
-        <button @click="activeSection = section.id"
+        <button @click="switchTab(section.id)"
                 :class="activeSection === section.id
                   ? 'bg-slate-700 text-white'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
@@ -60,7 +60,7 @@
 <script>
 function adminSettings() {
   return {
-    activeSection: 'global',
+    activeSection: localStorage.getItem('sc_adminSettingsTab') || 'global',
     searchQuery: '',
     sections: [
       { id: 'global', label: 'Platform' },
@@ -136,6 +136,7 @@ function adminSettings() {
     /** Re-apply filter when the tab changes. */
     switchTab(id) {
       this.activeSection = id;
+      localStorage.setItem('sc_adminSettingsTab', id);
       this.$nextTick(() => this.filterSettings());
     },
   };

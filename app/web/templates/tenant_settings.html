@@ -14,7 +14,7 @@
   <aside class="w-44 flex-shrink-0">
     <nav class="space-y-0.5">
       <template x-for="section in sections" :key="section.id">
-        <button @click="activeSection = section.id"
+        <button @click="switchSection(section.id)"
                 :class="activeSection === section.id
                   ? 'bg-slate-700 text-white'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
@@ -233,7 +233,7 @@
 function tenantSettings(slug) {
   return {
     slug,
-    activeSection: 'general',
+    activeSection: localStorage.getItem('sc_tenantSettingsTab') || 'general',
     loading: true,
     sections: [
       { id: 'general',       label: 'General' },
@@ -273,6 +273,11 @@ function tenantSettings(slug) {
         }
       } catch (_) {}
       this.loading = false;
+    },
+
+    switchSection(id) {
+      this.activeSection = id;
+      localStorage.setItem('sc_tenantSettingsTab', id);
     },
 
     async save(section) {
