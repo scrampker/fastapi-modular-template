@@ -1,0 +1,39 @@
+# ScottyCore App Registry
+# =======================
+# Single source of truth for all apps that consume ScottyCore patterns.
+# Used by: sync-watcher.py, pattern_tracker.py, scottycore-validate.py
+#
+# To register a new app, run:
+#   python3 scripts/scottycore-init.py /path/to/app
+#
+# Or add an entry here manually and run the init script afterward.
+
+# The core template itself. Always present, never a "target" for its own syncs.
+scottycore:
+  path: /script/scottycore
+  stack: FastAPI (shared template)
+  branch: master
+  is_core: true
+
+# ── Consumer apps ─────────────────────────────────────────────────────────────
+
+scottystrike:
+  path: /script/scottystrike
+  stack: FastAPI (from scottycore)
+  branch: master
+  # ScottyStrike uses Falcon OAuth2; most auth patterns are ignored.
+  # See .scottycore-patterns.yaml in the app root for details.
+
+scottyscribe:
+  path: /script/scottyscribe
+  stack: Flask + WhisperX + GPU
+  branch: master
+  # Flask app — patterns are adapted to Flask idioms (blueprints,
+  # before_request hooks) rather than FastAPI services.
+
+scottyscan:
+  path: /script/ScottyScan
+  stack: PowerShell + webapp
+  branch: master
+  # The origin app. Most patterns were extracted from here.
+  # PowerShell scanner side is domain-specific; webapp side adopts core.

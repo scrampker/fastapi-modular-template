@@ -354,11 +354,19 @@ def main():
     import sys
 
     scottycore = Path("/script/scottycore")
-    apps = {
-        "scottystrike": Path("/script/scottystrike"),
-        "scottyscribe": Path("/script/scottyscribe"),
-        "scottyscan": Path("/script/ScottyScan"),
-    }
+
+    # Load consumer apps from central config, falling back to hardcoded paths
+    try:
+        sys.path.insert(0, str(scottycore / "scripts"))
+        from config_loader import get_consumer_apps
+        consumer_cfg = get_consumer_apps()
+        apps = {name: Path(cfg["path"]) for name, cfg in consumer_cfg.items()}
+    except (ImportError, FileNotFoundError):
+        apps = {
+            "scottystrike": Path("/script/scottystrike"),
+            "scottyscribe": Path("/script/scottyscribe"),
+            "scottyscan": Path("/script/ScottyScan"),
+        }
 
     drift = compute_drift(scottycore, apps)
     core_patterns = sorted({

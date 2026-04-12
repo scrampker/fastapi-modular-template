@@ -43,30 +43,22 @@ from pathlib import Path
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-REPOS = {
-    "scottycore": {
-        "path": "/script/scottycore",
-        "stack": "FastAPI (shared template)",
-        "branch": "master",
-    },
-    "scottystrike": {
-        "path": "/script/scottystrike",
-        "stack": "FastAPI (from scottycore)",
-        "branch": "master",
-    },
-    "scottyscribe": {
-        "path": "/script/scottyscribe",
-        "stack": "Flask + WhisperX + GPU",
-        "branch": "master",
-    },
-    "scottyscan": {
-        "path": "/script/ScottyScan",
-        "stack": "PowerShell + webapp",
-        "branch": "master",
-    },
-}
-
 CORE_DIR = Path("/script/scottycore")
+
+# Load app registry from config/apps.yaml (single source of truth).
+# Falls back to minimal scottycore-only dict if config is missing.
+sys.path.insert(0, str(CORE_DIR / "scripts"))
+try:
+    from config_loader import get_repos_dict
+    REPOS = get_repos_dict()
+except (ImportError, FileNotFoundError):
+    REPOS = {
+        "scottycore": {
+            "path": str(CORE_DIR),
+            "stack": "FastAPI (shared template)",
+            "branch": "master",
+        },
+    }
 REPORTS_DIR = CORE_DIR / "data" / "sync-reports"
 STATE_FILE = CORE_DIR / "data" / "sync-watcher-state.json"
 LOG_FILE = CORE_DIR / "data" / "sync-watcher.log"
@@ -707,11 +699,20 @@ def _main_inner(args: list, dry_run: bool, force: bool, report_only: bool):
             f"---\n*Created by sync-watcher.py*"
         )
 
-        # Create issue in scottycore (central) and any target repos that have pending branches
+        # Create issues in TARGET repos only — never in source repos.
+        # If you're actively working in scottycore and commit, the alert
+        # should appear in scottystrike/scottyscribe/scottyscan, not here.
         issue_urls = []
-        url = create_github_issue(str(CORE_DIR), f"sync-agent: needs human — {repos_list}", issue_body)
-        if url:
-            issue_urls.append(url)
+        source_repos_set = set(changes.keys())
+        for target_name, target_config in REPOS.items():
+            if target_name not in source_repos_set:
+                url = create_github_issue(
+                    target_config["path"],
+                    f"sync-agent: needs human — {repos_list}",
+                    issue_body,
+                )
+                if url:
+                    issue_urls.append(url)
 
         notify_all(
             f"Sync needs your attention ({repos_list})",
