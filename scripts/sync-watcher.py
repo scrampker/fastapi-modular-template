@@ -30,7 +30,7 @@ Env vars:
     SYNC_TMUX_TARGET    tmux pane for notifications (e.g. "main:0.1")
     SYNC_CLAUDE_MODEL   Model override (default: opus)
     SYNC_MAX_BUDGET     USD cap per run (default: 20.00)
-    SYNC_AUTO_MERGE     Set to "1" to auto-merge sync branches (default: on)
+    SYNC_AUTO_MERGE     (deprecated — agent commits directly, no branches)
     SYNC_HUBITAT_CONFIG  Path to hubitat JSON config (default: ~/.config/scottycore-hubitat.json)
 """
 
@@ -68,7 +68,8 @@ LOCK_FILE = CORE_DIR / "data" / "sync-watcher.lock"
 TMUX_TARGET = os.environ.get("SYNC_TMUX_TARGET")
 CLAUDE_MODEL = os.environ.get("SYNC_CLAUDE_MODEL", "opus")
 MAX_BUDGET = os.environ.get("SYNC_MAX_BUDGET", "20.00")
-AUTO_MERGE = os.environ.get("SYNC_AUTO_MERGE", "1") == "1"  # default ON
+# Legacy — sync branches are no longer created. Agent commits directly.
+AUTO_MERGE = True
 HUBITAT_CONFIG = Path(os.environ.get(
     "SYNC_HUBITAT_CONFIG",
     os.path.expanduser("~/.config/scottycore-hubitat.json"),
@@ -261,24 +262,22 @@ Do NOT make any changes. Only analyze and write the sync report.
     else:
         mode_instructions = f"""
 ## MODE: AUTONOMOUS FIX
-You have full write access to all repos. When you identify a fix that should propagate:
+You have full write access to all repos. Work directly on the default branch — no sync branches.
+
+When you identify a fix that should propagate:
 
 1. **Read the target repo's relevant files** to understand their current state
-2. **Create a sync branch**: `git -C <repo_path> checkout -b sync/<source>-<short_desc>-<date>`
-3. **Make the fix** using Edit/Write tools — adapt to each repo's stack:
+2. **Make the fix** using Edit/Write tools — adapt to each repo's stack:
    - ScottyStrike: FastAPI, same patterns as ScottyCore
    - ScottyScribe: Flask, adapt conceptually (not copy-paste)
    - ScottyScan: PowerShell scanner + webapp, usually only webapp is relevant
-4. **Commit**: `git -C <repo_path> add -A && git -C <repo_path> commit -m "sync: <description> (from <source>)"`
-5. **Switch back**: `git -C <repo_path> checkout <default_branch>`
-{'''6. **Auto-merge + push**: After committing on the sync branch, merge it into the default branch and push:
+3. **Commit directly to the default branch**:
    ```
-   git -C <repo_path> checkout <default_branch>
-   git -C <repo_path> merge sync/<branch_name> --no-edit
-   git -C <repo_path> branch -d sync/<branch_name>
+   git -C <repo_path> add <specific files>
+   git -C <repo_path> commit -m "sync: <description> (from <source>)"
    git -C <repo_path> push origin <default_branch>
    ```
-   EXCEPTION: If the fix touches database schemas, API contracts, or you are uncertain — leave the sync branch unmerged and tag the report with `NEEDS_HUMAN: <reason>`. The watcher will send a notification.''' if AUTO_MERGE else "6. **Leave the branch** for the user to review and merge."}
+4. **If you are uncertain** whether a fix is safe (DB schema changes, API contract changes, major refactors), do NOT make changes — instead tag the report with `NEEDS_HUMAN: <reason>`.
 
 PATTERN ADOPTION MANIFESTS:
 Each target repo above lists `adopted` and `ignored` patterns from its `.scottycore-patterns.yaml`.
@@ -289,12 +288,11 @@ Each target repo above lists `adopted` and `ignored` patterns from its `.scottyc
 
 CRITICAL RULES — VIOLATION OF THESE CAUSES INFINITE LOOPS:
 - **SOURCE REPOS ARE READ-ONLY**: The following repos triggered this run and MUST NOT be modified: {", ".join(f"`{r}` (`{changes[r]['path']}`)" for r in source_repos)}
-- You may ONLY create branches and commits in the TARGET repos listed above
+- You may ONLY commit in the TARGET repos listed above
 - If you find yourself about to edit a file in {", ".join(f"`{changes[r]['path']}`" for r in source_repos)} — STOP. That is a source repo.
 - NEVER force-push or rebase
-- If you're unsure whether a fix applies, create the branch but note uncertainty in the commit message
+- NEVER create sync/* branches — commit directly to the default branch
 - If the target repo's code has diverged significantly, skip and note it in the report
-- Always switch back to the default branch when done with a repo
 - All commit messages MUST start with `sync:` prefix
 """
 
@@ -393,15 +391,6 @@ def run_agent(prompt: str, report_only: bool) -> tuple[str, int]:
         return "AGENT_ERROR: Claude CLI timed out after 10 minutes", 1
 
 
-def check_sync_branches() -> dict:
-    """Check all repos for pending sync branches."""
-    pending = {}
-    for name, config in REPOS.items():
-        branches = git(config["path"], "branch", "--list", "sync/*")
-        if branches:
-            pending[name] = [b.strip().lstrip("* ") for b in branches.split("\n") if b.strip()]
-    return pending
-
 
 def notify_tmux(message: str):
     if not TMUX_TARGET:
@@ -484,15 +473,6 @@ def tail_reports():
     print(f"  Reports: {REPORTS_DIR}")
     print(f"  Log:     {LOG_FILE}")
     print()
-
-    # Show pending sync branches
-    pending = check_sync_branches()
-    if pending:
-        print("  PENDING SYNC BRANCHES:")
-        for repo, branches in pending.items():
-            for b in branches:
-                print(f"    {repo}: {b}")
-        print()
 
     # Show last report
     reports = sorted(REPORTS_DIR.glob("sync_*.md"))
@@ -720,28 +700,26 @@ def _main_inner(args: list, dry_run: bool, force: bool, report_only: bool):
             priority="P2",
         )
 
-    # ── Check for sync branches created ──────────────────────────────────
-    pending = check_sync_branches()
-    if pending:
-        branch_count = sum(len(b) for b in pending.values())
-        log(f"Sync branches created: {branch_count}")
-        for repo, branches in pending.items():
-            for b in branches:
-                log(f"  {repo}: {b}")
-        if AUTO_MERGE:
-            notify_all(f"{branch_count} sync branch(es) pending — auto-merge is on but agent left branches (may need review)")
-        else:
-            notify_all(f"{branch_count} sync branch(es) ready for review")
-    else:
-        log("No sync branches created (changes applied directly or no cross-app fixes needed)")
-        notify_all(f"Checked {total} commits — sync complete")
-
-    # ── Ensure all repos are back on default branch ──────────────────────
+    # ── Clean up any stale sync branches the agent may have left ────────
+    # The agent is now instructed to commit directly — these shouldn't exist.
+    # If they do, log a warning but don't notify (they're orphans, not actionable).
     for repo_name, config in REPOS.items():
         current_branch = git(config["path"], "branch", "--show-current")
         if current_branch and current_branch.startswith("sync/"):
-            log(f"  WARNING: {repo_name} still on sync branch {current_branch}, switching back")
+            log(f"  Cleaning up: {repo_name} still on {current_branch}, switching back to {config['branch']}")
             git(config["path"], "checkout", config["branch"])
+
+        # Delete any orphan sync/* branches
+        branches = git(config["path"], "branch", "--list", "sync/*")
+        if branches:
+            for b in branches.split("\n"):
+                b = b.strip().lstrip("* ")
+                if b:
+                    log(f"  Deleting orphan sync branch in {repo_name}: {b}")
+                    git(config["path"], "branch", "-D", b)
+
+    # Only log completion — no notification unless NEEDS_HUMAN was flagged above
+    log(f"Sync complete: processed {total} commit(s) from {repos_list}")
 
     save_state(new_state)
     log("Done.")
