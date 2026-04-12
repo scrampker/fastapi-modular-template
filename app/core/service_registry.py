@@ -38,8 +38,8 @@ class ServiceRegistry:
         self.users = UsersService(session_factory, self.audit)
         self.settings = SettingsService(session_factory)
 
-        # Layer 1b: Stateless infrastructure (no DB, no cross-deps)
-        self.ai_backends = AIBackendsService()
+        # Layer 1b: Stateless infrastructure (reads config from settings store)
+        self.ai_backends = AIBackendsService(settings_service=self.settings)
 
         # Layer 2: Domain services
         self.items = ItemsService(session_factory, self.audit)

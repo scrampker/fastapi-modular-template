@@ -85,14 +85,23 @@ def _detect_local_gpu() -> tuple[str | None, int | None]:
 class AIBackendsService:
     """Multi-provider AI backend management.
 
-    This service is stateless — it reads config from the provided
-    AIBackendConfig and checks endpoint health on demand. Apps wire
-    it into their service registry and optionally persist config
-    via the settings service.
+    Config resolution order (highest priority wins):
+      1. Settings store (GlobalSettings.ai_endpoint_* fields) — managed via UI
+      2. Environment variables (.env file)
+      3. BASELINE_ENDPOINTS hardcoded defaults
+
+    The settings_service is optional. When provided, `load_from_settings()`
+    reads persisted config from the DB. When not provided (or the settings
+    table is empty), env vars and baseline defaults are used.
     """
 
-    def __init__(self, config: AIBackendConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: AIBackendConfig | None = None,
+        settings_service: object | None = None,
+    ) -> None:
         self._config = config or self._build_default_config()
+        self._settings_service = settings_service
 
     @property
     def config(self) -> AIBackendConfig:
@@ -100,6 +109,63 @@ class AIBackendsService:
 
     def update_config(self, config: AIBackendConfig) -> None:
         """Replace the current config (e.g. after loading from settings store)."""
+        self._config = config
+
+    async def load_from_settings(self) -> None:
+        """Reload config from the settings store, layered on top of env/baseline.
+
+        Called at startup and whenever settings are changed via the UI.
+        """
+        if self._settings_service is None:
+            return
+
+        try:
+            settings = await self._settings_service.get_global()  # type: ignore[union-attr]
+        except Exception:
+            return  # Settings store not available yet (e.g. first run)
+
+        # Start with env/baseline defaults
+        config = self._build_default_config()
+
+        # Override with persisted settings
+        config = config.model_copy(update={
+            "default_provider": AIProviderName(settings.ai_default_provider),
+            "fallback_chain": [AIProviderName(p) for p in settings.ai_fallback_chain],
+        })
+
+        # Map settings schema fields to provider names
+        setting_map = {
+            AIProviderName.OLLAMA: settings.ai_endpoint_ollama,
+            AIProviderName.DGX: settings.ai_endpoint_dgx,
+            AIProviderName.CLAUDE_CLI: settings.ai_endpoint_claude_cli,
+            AIProviderName.CLAUDE_API: settings.ai_endpoint_claude_api,
+            AIProviderName.OPENAI: settings.ai_endpoint_openai,
+            AIProviderName.AZURE_OPENAI: settings.ai_endpoint_azure_openai,
+        }
+
+        for provider, setting in setting_map.items():
+            if setting is None:
+                continue
+            # Only override fields that the user has actually set (non-default)
+            ep = config.endpoints.get(provider)
+            if ep is None:
+                continue
+            updates: dict = {}
+            if setting.url:
+                updates["url"] = setting.url
+            if setting.model:
+                updates["model"] = setting.model
+            if setting.api_key:
+                updates["api_key"] = setting.api_key
+            updates["enabled"] = setting.enabled
+            if setting.context_window:
+                updates["context_window"] = setting.context_window
+            if setting.priority:
+                updates["priority"] = setting.priority
+            if setting.notes:
+                updates["notes"] = setting.notes
+            config.endpoints[provider] = ep.model_copy(update=updates)
+
         self._config = config
 
     @staticmethod
