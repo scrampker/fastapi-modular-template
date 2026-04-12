@@ -17,6 +17,7 @@ from app.services.search.service import SearchService
 from app.services.settings.service import SettingsService
 from app.services.items.service import ItemsService
 from app.services.files.service import FilesService
+from app.services.ai_backends.service import AIBackendsService
 
 
 def _registry(request: Request) -> ServiceRegistry:
@@ -50,3 +51,6 @@ def get_items_service(reg: ServiceRegistry = Depends(_registry)) -> ItemsService
 
 def get_files_service(reg: ServiceRegistry = Depends(_registry)) -> FilesService:
     return reg.files
+
+def get_ai_backends_service(reg: ServiceRegistry = Depends(_registry)) -> AIBackendsService:
+    return reg.ai_backends

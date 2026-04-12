@@ -18,6 +18,7 @@ adopted:
   - middleware.security_headers # HSTS, CSP, X-Frame-Options
   - settings.kv_hierarchy       # 4-tier global → tenant → user settings
   - audit.immutable_log         # SOC2 audit trail
+  - ai_backends.multi_provider  # Multi-provider AI with DGX/Ollama/Claude/OpenAI fallback
 
 # Patterns this app has explicitly opted out of. The agent will skip
 # these even if scottycore updates them. Add a comment explaining why.

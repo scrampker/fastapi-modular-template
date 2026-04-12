@@ -16,6 +16,7 @@ from app.services.search.service import SearchService
 from app.services.settings.service import SettingsService
 from app.services.items.service import ItemsService
 from app.services.files.service import FilesService
+from app.services.ai_backends.service import AIBackendsService
 
 
 class ServiceRegistry:
@@ -36,6 +37,9 @@ class ServiceRegistry:
         self.tenants = TenantsService(session_factory, self.audit)
         self.users = UsersService(session_factory, self.audit)
         self.settings = SettingsService(session_factory)
+
+        # Layer 1b: Stateless infrastructure (no DB, no cross-deps)
+        self.ai_backends = AIBackendsService()
 
         # Layer 2: Domain services
         self.items = ItemsService(session_factory, self.audit)

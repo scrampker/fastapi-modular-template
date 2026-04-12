@@ -100,6 +100,53 @@ python3 scripts/sync-watcher.py --drift-report --write   # save to data/drift-re
 
 A weekly cron writes a fresh drift report every Monday at 09:00.
 
+## AI Backends — Multi-Provider Requirement
+
+**Every ScottyCore app MUST support multiple AI backends.** The `ai_backends` service module provides a framework-agnostic, config-driven approach to routing AI requests across providers with automatic fallback.
+
+### Supported Providers
+
+| Provider | Type | Config Key | Notes |
+|----------|------|-----------|-------|
+| `claude_cli` | Local CLI | (none — uses host auth) | `claude -p`, always available on dev machines, no API key needed |
+| `claude_api` | API | `ANTHROPIC_API_KEY` | Anthropic SDK direct, or piggyback on Claude Code OAuth token |
+| `ollama` | Local GPU | `OLLAMA_URL` | Self-hosted models on GPU nodes (CT 114: `192.168.150.210`) |
+| `dgx` | Remote GPU | `DGX_OLLAMA_URL` | DGX Spark on homelab (`192.168.150.111`), larger MoE models |
+| `openai` | API | `OPENAI_API_KEY` | GPT-4o, o1, etc. |
+| `azure_openai` | API | `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_KEY` | Enterprise Azure OpenAI |
+| `custom` | API | (per-instance) | Any OpenAI-compatible API (vLLM, TGI, LiteLLM) |
+
+### Fallback Chain
+
+Default resolution order: **DGX > local Ollama > Claude CLI**. Each provider is health-checked with a 3-second timeout and 30-second cache. First reachable provider wins.
+
+### Baseline Defaults (for new app deployments)
+
+```bash
+DGX_OLLAMA_URL=http://192.168.150.111:11434    # DGX Spark
+DGX_OLLAMA_MODEL=qwen3.5:35b-a3b               # MoE: 3B active, ~55-70 tok/s
+OLLAMA_URL=http://192.168.150.210:11434         # Local GPU (CT 114)
+OLLAMA_MODEL_CHAT=qwen2.5:7b                   # Fast local model
+# claude -p always available if Claude Code is installed
+```
+
+### API
+
+- `GET /api/v1/ai/health` — health status of all configured backends
+- `GET /api/v1/ai/resolve?provider=auto` — which provider would handle a request
+
+### Pattern
+
+This is tracked as `ai_backends.multi_provider`. Apps adopting this pattern get automatic sync when backend configs, health check logic, or provider support is updated in ScottyCore.
+
+### Adding a New Backend
+
+1. Add a variant to `AIProviderName` enum in `schemas.py`
+2. Add baseline config to `BASELINE_ENDPOINTS`
+3. Add env var mapping in `_build_default_config()`
+4. Add health check logic in `check_all_health()` if needed
+5. The sync watcher propagates to all apps that adopt the pattern
+
 ## Architecture: Contract-First Modular Service Layer
 
 Every module communicates through typed service interfaces (Pydantic schemas in, Pydantic schemas out). No module imports another module's ORM models or writes queries against another module's tables.
