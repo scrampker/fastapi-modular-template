@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, Request
 from app.core.auth import require_auth
 from app.core.dependencies import get_auth_service, get_users_service
 from app.core.exceptions import AuthenticationError
-from app.services.audit.schemas import AuditLogCreate
 from app.services.auth.schemas import (
     BackupCodesResponse,
     LoginRequest,
@@ -24,8 +23,6 @@ from app.services.auth.service import AuthService
 from app.services.users.service import UsersService
 
 router = APIRouter()
-
-_GENERIC_LOGIN_ERROR = "Invalid email or password"
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -46,48 +43,11 @@ async def login(
     reason to avoid revealing whether the email address exists.
     """
     ip = request.client.host if request.client else "unknown"
-    email_lower = body.email.strip().lower()
-
-    # Check lockout before attempting credential verification
-    if await auth.check_lockout(email_lower):
-        # Record this blocked attempt so the lockout window stays fresh
-        await auth.record_login_attempt(email_lower, success=False, ip_address=ip)
-        raise AuthenticationError(_GENERIC_LOGIN_ERROR)
-
-    password_hash = await users.get_password_hash(email_lower)
-    if not password_hash or not auth.verify_password(body.password, password_hash):
-        await auth.record_login_attempt(email_lower, success=False, ip_address=ip)
-        raise AuthenticationError(_GENERIC_LOGIN_ERROR)
-
-    user = await users.get_by_email(email_lower)
-    if not user or not user.is_active:
-        await auth.record_login_attempt(email_lower, success=False, ip_address=ip)
-        raise AuthenticationError(_GENERIC_LOGIN_ERROR)
-
-    # Fetch ORM object for TOTP and session_version fields
-    user_obj = await _get_user_orm(request, user.id)
-    session_version = getattr(user_obj, "session_version", 0) if user_obj else 0
-
-    await auth.record_login_attempt(email_lower, success=True, ip_address=ip)
-    await auth._audit.log(AuditLogCreate(
-        user_id=user.id,
-        action="auth.login",
-        target_type="user",
-        target_id=str(user.id),
-        detail={"email": email_lower},
+    return await auth.login(
+        email=body.email,
+        password=body.password,
         ip_address=ip,
-    ))
-
-    if user_obj is not None and getattr(user_obj, "totp_enabled", False):
-        partial_token = auth.create_access_token(
-            user.id, totp_pending=True, session_version=session_version
-        )
-        return LoginResponse(requires_totp=True, partial_token=partial_token)
-
-    access_token = auth.create_access_token(user.id, session_version=session_version)
-    return LoginResponse(
-        access_token=access_token,
-        expires_in=auth._settings.jwt_access_token_expire_minutes * 60,
+        users_service=users,
     )
 
 
@@ -129,6 +89,7 @@ async def totp_enable(
     body: TOTPEnableRequest,
     current_user: UserContext = Depends(require_auth),
     auth: AuthService = Depends(get_auth_service),
+    users: UsersService = Depends(get_users_service),
 ) -> BackupCodesResponse:
     """Confirm TOTP setup by validating the first code.
 
@@ -138,7 +99,9 @@ async def totp_enable(
     Pass the ``secret`` returned by ``POST /auth/totp/setup`` together with the
     ``code`` from the authenticator app.
     """
-    return await auth.enable_totp(current_user.user_id, body.secret, body.code)
+    return await auth.enable_totp(
+        current_user.user_id, body.secret, body.code, users_service=users
+    )
 
 
 @router.post("/totp/verify", response_model=TokenResponse)
@@ -146,6 +109,7 @@ async def totp_verify(
     body: TOTPVerifyRequest,
     request: Request,
     auth: AuthService = Depends(get_auth_service),
+    users: UsersService = Depends(get_users_service),
 ) -> TokenResponse:
     """Exchange a partial token + TOTP code for a full access token.
 
@@ -173,7 +137,7 @@ async def totp_verify(
         raise AuthenticationError("Invalid token: no subject")
 
     user_id = UUID(user_id_str)
-    verified = await auth.verify_totp(user_id, body.code)
+    verified = await auth.verify_totp(user_id, body.code, users_service=users)
     if not verified:
         raise AuthenticationError("Invalid verification code")
 
@@ -186,21 +150,13 @@ async def totp_disable(
     body: TOTPVerifyRequest,
     current_user: UserContext = Depends(require_auth),
     auth: AuthService = Depends(get_auth_service),
+    users: UsersService = Depends(get_users_service),
 ) -> dict:
     """Disable TOTP for the authenticated user after verifying the current code."""
-    verified = await auth.verify_totp(current_user.user_id, body.code)
+    verified = await auth.verify_totp(
+        current_user.user_id, body.code, users_service=users
+    )
     if not verified:
         raise AuthenticationError("Invalid verification code")
-    await auth.disable_totp(current_user.user_id)
+    await auth.disable_totp(current_user.user_id, users_service=users)
     return {"message": "Two-factor authentication has been disabled"}
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-async def _get_user_orm(request: Request, user_id: UUID):
-    """Fetch the raw ORM User object to read TOTP fields not in UserRead."""
-    from app.services.users.models import User
-
-    registry = request.app.state.registry
-    async with registry.users._session_factory() as session:
-        return await session.get(User, str(user_id))

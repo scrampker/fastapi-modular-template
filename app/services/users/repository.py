@@ -97,3 +97,13 @@ class UserRepository:
                 setattr(user, key, value)
         await self._session.flush()
         return user
+
+    async def list_active_superadmins(self) -> list[User]:
+        """Return all active superadmin users."""
+        result = await self._session.scalars(
+            select(User).where(
+                User.is_superadmin == True,  # noqa: E712
+                User.is_active == True,  # noqa: E712
+            )
+        )
+        return list(result.all())

@@ -43,6 +43,6 @@ class ServiceRegistry:
 
         # Layer 3: Composite / cross-domain services
         self.search = SearchService(
-            session_factory,
+            self.items,
             self.tenants,
         )

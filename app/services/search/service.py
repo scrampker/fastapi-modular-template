@@ -4,11 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from app.services.items.repository import ItemRepository
-from app.services.tenants.models import Tenant
+from app.services.items.service import ItemsService
 from app.services.tenants.service import TenantsService
 from app.services.search.schemas import SearchResultItem, SearchResults
 
@@ -39,14 +35,18 @@ _SETTINGS_REGISTRY: list[dict] = [
 
 
 class SearchService:
-    """Composite service that searches across tenants, items, and settings."""
+    """Composite service that searches across tenants, items, and settings.
+
+    This service does NOT own a session_factory — it delegates all database
+    access to the services it depends on (TenantsService, ItemsService).
+    """
 
     def __init__(
         self,
-        session_factory: async_sessionmaker[AsyncSession],
+        items: ItemsService,
         tenants: TenantsService,
     ) -> None:
-        self._session_factory = session_factory
+        self._items = items
         self._tenants = tenants
 
     async def search(
@@ -59,16 +59,15 @@ class SearchService:
         """Run a cross-domain search and return grouped results."""
         like = f"%{q}%"
 
-        async with self._session_factory() as session:
-            tenants_list = (
-                await self._search_tenants(session, like) if is_superadmin else []
-            )
-            settings = self._search_settings(q, tenant_slug or "default")
-            items_list = (
-                await self._search_items(session, str(tenant_id), q)
-                if tenant_id is not None
-                else []
-            )
+        tenants_list = (
+            await self._search_tenants(like) if is_superadmin else []
+        )
+        settings = self._search_settings(q, tenant_slug or "default")
+        items_list = (
+            await self._search_items(tenant_id, q)
+            if tenant_id is not None
+            else []
+        )
 
         results: dict[str, list[SearchResultItem]] = {}
         if tenants_list:
@@ -88,41 +87,31 @@ class SearchService:
         limit: int = _PER_CATEGORY,
     ) -> list[SearchResultItem]:
         """Search items by full-text search for a specific tenant."""
-        async with self._session_factory() as session:
-            return await self._search_items(session, str(tenant_id), query, limit)
+        return await self._search_items(tenant_id, query, limit)
 
     async def _search_items(
         self,
-        session: AsyncSession,
-        tenant_id: str,
+        tenant_id: UUID,
         q: str,
         limit: int = _PER_CATEGORY,
     ) -> list[SearchResultItem]:
-        repo = ItemRepository(session)
-        rows = await repo.search_fts(tenant_id, q, limit)
+        hits = await self._items.search_fts(tenant_id, q, limit)
         return [
             SearchResultItem(
-                id=item.id,
-                title=item.name,
-                subtitle=item.description,
-                url=f"/c/{{slug}}/items/{item.id}",
-                highlight=highlight or None,
+                id=hit.item.id,
+                title=hit.item.name,
+                subtitle=hit.item.description,
+                url=f"/c/{{slug}}/items/{hit.item.id}",
+                highlight=hit.highlight,
             )
-            for item, highlight in rows
+            for hit in hits
         ]
 
     async def _search_tenants(
         self,
-        session: AsyncSession,
         like: str,
     ) -> list[SearchResultItem]:
-        rows = (
-            await session.scalars(
-                select(Tenant)
-                .where(Tenant.name.ilike(like))
-                .limit(_PER_CATEGORY)
-            )
-        ).all()
+        tenants = await self._tenants.search_by_name(like, _PER_CATEGORY)
         return [
             SearchResultItem(
                 id=r.id,
@@ -131,7 +120,7 @@ class SearchService:
                 url=f"/c/{r.slug}/dashboard",
                 meta={"slug": r.slug, "is_active": r.is_active},
             )
-            for r in rows
+            for r in tenants
         ]
 
     def _search_settings(self, q: str, slug: str) -> list[SearchResultItem]:

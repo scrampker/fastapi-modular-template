@@ -34,6 +34,12 @@ class ItemRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ItemSearchResult(BaseModel):
+    """A single FTS search hit with optional highlight snippet."""
+    item: ItemRead
+    highlight: str | None = None
+
+
 class ItemFilter(PaginationParams):
     is_active: bool | None = None
     search: str | None = None

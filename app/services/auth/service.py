@@ -11,6 +11,7 @@ import io
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import pyotp
@@ -25,7 +26,10 @@ from app.core.exceptions import AuthenticationError
 from app.services.audit.schemas import AuditLogCreate
 from app.services.audit.service import AuditService
 from app.services.auth.models import LoginAttempt, RefreshToken
-from app.services.auth.schemas import BackupCodesResponse, TOTPSetupResponse, TokenResponse, UserContext
+from app.services.auth.schemas import BackupCodesResponse, LoginResponse, TOTPSetupResponse, TokenResponse, UserContext
+
+if TYPE_CHECKING:
+    from app.services.users.service import UsersService
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -236,6 +240,68 @@ class AuthService:
 
         return False
 
+    # ── Login orchestration ─────────────────────────────────────────────
+
+    async def login(
+        self,
+        email: str,
+        password: str,
+        ip_address: str,
+        users_service: UsersService,
+    ) -> LoginResponse:
+        """Full login flow: lockout check, credential verification, TOTP branch.
+
+        Args:
+            email: Raw email from the request (will be lowered/stripped).
+            password: Plaintext password.
+            ip_address: Client IP for audit logging.
+            users_service: UsersService instance (injected to avoid circular import).
+
+        Raises:
+            AuthenticationError: On any failure (generic message to prevent enumeration).
+        """
+        _GENERIC = "Invalid email or password"
+        email_lower = email.strip().lower()
+
+        # Check lockout before attempting credential verification
+        if await self.check_lockout(email_lower):
+            await self.record_login_attempt(email_lower, success=False, ip_address=ip_address)
+            raise AuthenticationError(_GENERIC)
+
+        password_hash = await users_service.get_password_hash(email_lower)  # type: ignore[union-attr]
+        if not password_hash or not self.verify_password(password, password_hash):
+            await self.record_login_attempt(email_lower, success=False, ip_address=ip_address)
+            raise AuthenticationError(_GENERIC)
+
+        user = await users_service.get_by_email(email_lower)  # type: ignore[union-attr]
+        if not user or not user.is_active:
+            await self.record_login_attempt(email_lower, success=False, ip_address=ip_address)
+            raise AuthenticationError(_GENERIC)
+
+        session_version = user.session_version
+
+        await self.record_login_attempt(email_lower, success=True, ip_address=ip_address)
+        await self._audit.log(AuditLogCreate(
+            user_id=user.id,
+            action="auth.login",
+            target_type="user",
+            target_id=str(user.id),
+            detail={"email": email_lower},
+            ip_address=ip_address,
+        ))
+
+        if user.totp_enabled:
+            partial_token = self.create_access_token(
+                user.id, totp_pending=True, session_version=session_version
+            )
+            return LoginResponse(requires_totp=True, partial_token=partial_token)
+
+        access_token = self.create_access_token(user.id, session_version=session_version)
+        return LoginResponse(
+            access_token=access_token,
+            expires_in=self._settings.jwt_access_token_expire_minutes * 60,
+        )
+
     # ── TOTP 2FA ───────────────────────────────────────────────────────
 
     def generate_totp_secret(self, user_email: str) -> TOTPSetupResponse:
@@ -287,10 +353,17 @@ class AuthService:
         ]
         return json.dumps(hashed)
 
-    async def enable_totp(self, user_id: UUID, secret: str, code: str) -> BackupCodesResponse:
+    async def enable_totp(
+        self,
+        user_id: UUID,
+        secret: str,
+        code: str,
+        users_service: UsersService | None = None,
+    ) -> BackupCodesResponse:
         """Validate *code* against *secret*, then persist the secret and generate backup codes.
 
         Raises ``AuthenticationError`` if the code is invalid.
+        User mutations are delegated to UsersService.
         """
         if not self._verify_totp_code(secret, code):
             raise AuthenticationError("Invalid TOTP code — please try again")
@@ -298,64 +371,64 @@ class AuthService:
         plaintext_codes = self._generate_plaintext_backup_codes()
         hashed_json = self._hash_backup_codes(plaintext_codes)
 
-        from app.services.users.models import User
-
-        async with self._session_factory() as session:
-            user = await session.get(User, str(user_id))
-            if not user:
-                raise AuthenticationError("User not found")
-            user.totp_secret = secret
-            user.totp_enabled = True
-            user.backup_codes = hashed_json
-            await session.commit()
+        if users_service is None:
+            raise AuthenticationError("Internal error: users_service required")
+        await users_service.set_totp(user_id, secret, hashed_json)
 
         return BackupCodesResponse(codes=plaintext_codes)
 
-    async def disable_totp(self, user_id: UUID) -> None:
-        """Clear all TOTP fields for the given user."""
-        from app.services.users.models import User
+    async def disable_totp(
+        self,
+        user_id: UUID,
+        users_service: UsersService | None = None,
+    ) -> None:
+        """Clear all TOTP fields for the given user.
 
-        async with self._session_factory() as session:
-            user = await session.get(User, str(user_id))
-            if not user:
-                raise AuthenticationError("User not found")
-            user.totp_secret = None
-            user.totp_enabled = False
-            user.backup_codes = None
-            await session.commit()
+        User mutations are delegated to UsersService.
+        """
+        if users_service is None:
+            raise AuthenticationError("Internal error: users_service required")
+        await users_service.clear_totp(user_id)
 
-    async def verify_totp(self, user_id: UUID, code: str) -> bool:
+    async def verify_totp(
+        self,
+        user_id: UUID,
+        code: str,
+        users_service: UsersService | None = None,
+    ) -> bool:
         """Verify a TOTP or backup code for the given user.
 
         Backup codes are one-time-use: a matching code is removed from the
         stored list on success.  Returns ``True`` on success.
+        User data is read/written via UsersService.
         """
-        from app.services.users.models import User
+        if users_service is None:
+            return False
 
-        async with self._session_factory() as session:
-            user = await session.get(User, str(user_id))
-            if not user or not user.totp_enabled or not user.totp_secret:
-                return False
+        totp_secret, totp_enabled, backup_codes = await users_service.get_totp_fields(user_id)
+        if not totp_enabled or not totp_secret:
+            return False
 
-            # Check TOTP first
-            if self._verify_totp_code(user.totp_secret, code):
+        # Check TOTP first
+        if self._verify_totp_code(totp_secret, code):
+            return True
+
+        # Fall back to backup code
+        if not backup_codes:
+            return False
+        try:
+            hashed_list: list[str] = json.loads(backup_codes)
+        except (json.JSONDecodeError, TypeError):
+            return False
+
+        normalized = code.strip().upper()
+        for i, h in enumerate(hashed_list):
+            if pwd_context.verify(normalized, h):
+                # Consume the code — remove from list
+                hashed_list.pop(i)
+                await users_service.consume_backup_code(
+                    user_id, json.dumps(hashed_list)
+                )
                 return True
-
-            # Fall back to backup code
-            if not user.backup_codes:
-                return False
-            try:
-                hashed_list: list[str] = json.loads(user.backup_codes)
-            except (json.JSONDecodeError, TypeError):
-                return False
-
-            normalized = code.strip().upper()
-            for i, h in enumerate(hashed_list):
-                if pwd_context.verify(normalized, h):
-                    # Consume the code — remove from list
-                    hashed_list.pop(i)
-                    user.backup_codes = json.dumps(hashed_list)
-                    await session.commit()
-                    return True
 
         return False

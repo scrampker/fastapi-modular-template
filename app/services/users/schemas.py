@@ -31,6 +31,7 @@ class UserRead(BaseModel):
     is_superadmin: bool
     totp_enabled: bool = False
     must_change_password: bool = False
+    session_version: int = 0
     created_at: datetime
     last_login: datetime | None
 

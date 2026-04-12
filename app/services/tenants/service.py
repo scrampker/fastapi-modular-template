@@ -134,3 +134,25 @@ class TenantsService:
                 ip_address=ctx.ip_address,
             ))
             return ApiKeyResponse(api_key=raw_key)
+
+    async def verify_api_key(self, api_key: str) -> TenantRead | None:
+        """Look up a tenant by API key prefix and verify the full key.
+
+        Returns the tenant's public schema if the key is valid, None otherwise.
+        Uses SHA-256 prefix for O(1) lookup before bcrypt verification.
+        """
+        prefix = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+        async with self._session_factory() as session:
+            repo = TenantRepository(session)
+            tenant_obj = await repo.get_by_api_key_prefix(prefix)
+            if tenant_obj and tenant_obj.api_key_hash:
+                if AuthService.verify_api_key(api_key, tenant_obj.api_key_hash):
+                    return TenantRead.model_validate(tenant_obj)
+        return None
+
+    async def search_by_name(self, like: str, limit: int = 5) -> list[TenantRead]:
+        """Search tenants by name pattern. Used by SearchService."""
+        async with self._session_factory() as session:
+            repo = TenantRepository(session)
+            rows = await repo.search_by_name(like, limit)
+            return [TenantRead.model_validate(r) for r in rows]

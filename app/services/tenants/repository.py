@@ -65,3 +65,10 @@ class TenantRepository:
                 setattr(tenant, key, value)
         await self._session.flush()
         return tenant
+
+    async def search_by_name(self, like: str, limit: int = 5) -> list[Tenant]:
+        """Search tenants by ILIKE name pattern."""
+        result = await self._session.scalars(
+            select(Tenant).where(Tenant.name.ilike(like)).limit(limit)
+        )
+        return list(result.all())

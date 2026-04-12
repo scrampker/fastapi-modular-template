@@ -12,7 +12,7 @@ from app.core.schemas import AuditContext, PaginatedResponse
 from app.services.audit.schemas import AuditLogCreate
 from app.services.audit.service import AuditService
 from app.services.items.repository import ItemRepository
-from app.services.items.schemas import ItemCreate, ItemFilter, ItemRead, ItemRetentionReport, ItemUpdate
+from app.services.items.schemas import ItemCreate, ItemFilter, ItemRead, ItemRetentionReport, ItemSearchResult, ItemUpdate
 
 # Sentinel for optional audit context parameters
 _NO_CTX = None
@@ -144,6 +144,21 @@ class ItemsService:
                 target_id=str(item_id),
                 ip_address=ctx.ip_address,
             ))
+
+    async def search_fts(
+        self, tenant_id: UUID, query: str, limit: int = 5
+    ) -> list[ItemSearchResult]:
+        """Full-text search for items. Used by SearchService."""
+        async with self._session_factory() as session:
+            repo = ItemRepository(session)
+            rows = await repo.search_fts(str(tenant_id), query, limit)
+            return [
+                ItemSearchResult(
+                    item=ItemRead.model_validate(item),
+                    highlight=highlight or None,
+                )
+                for item, highlight in rows
+            ]
 
     async def check_retention(
         self, tenant_id: UUID, retention_days: int

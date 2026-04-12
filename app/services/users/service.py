@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
@@ -10,8 +11,12 @@ from app.core.exceptions import ConflictError, NotFoundError
 from app.core.schemas import AuditContext, PaginatedResponse, RoleName
 from app.services.audit.schemas import AuditLogCreate
 from app.services.audit.service import AuditService
+from app.services.auth.schemas import UserContext
 from app.services.auth.service import AuthService
 from app.services.users.repository import UserRepository
+
+if TYPE_CHECKING:
+    from app.services.tenants.service import TenantsService
 from app.services.users.schemas import (
     UserCreate,
     UserFilter,
@@ -291,3 +296,137 @@ class UsersService:
         async with self._session_factory() as session:
             repo = UserRepository(session)
             return await repo.count_all()
+
+    # ── Methods used by core/auth.py (service-layer boundary) ─────────
+
+    _EXTERNAL_AUTH_SENTINEL = "_external_auth_no_password_"
+
+    async def create_external_user(self, email: str, display_name: str) -> UserRead:
+        """Auto-provision a user from an external identity provider.
+
+        The user gets a sentinel password hash (not a real password) and is
+        created as a regular (non-superadmin) active user.  An admin must
+        assign them to a tenant before they can access anything.
+        """
+        async with self._session_factory() as session:
+            repo = UserRepository(session)
+            existing = await repo.get_by_email(email)
+            if existing:
+                return UserRead.model_validate(existing)
+            password_hash = AuthService.hash_password(self._EXTERNAL_AUTH_SENTINEL)
+            user = await repo.create(
+                email=email,
+                password_hash=password_hash,
+                display_name=display_name,
+            )
+            await session.commit()
+            return UserRead.model_validate(user)
+
+    async def promote_to_superadmin(self, email: str) -> None:
+        """Promote an existing user to superadmin. No-op if already superadmin."""
+        async with self._session_factory() as session:
+            repo = UserRepository(session)
+            user_obj = await repo.get_by_email(email)
+            if user_obj and not user_obj.is_superadmin:
+                await repo.update(user_obj, is_superadmin=True)
+                await session.commit()
+
+    async def has_local_password_superadmin(self) -> bool:
+        """Return True if at least one active superadmin has a real local password.
+
+        Used before disabling the 'local' auth provider to prevent full lockout.
+        An account is considered external-only when its password_hash was set to
+        the bcrypt-hashed sentinel value.  We use verify_password() for the check
+        because the sentinel is stored hashed (not as a raw string).
+        """
+        async with self._session_factory() as session:
+            repo = UserRepository(session)
+            superadmins = await repo.list_active_superadmins()
+            for user in superadmins:
+                if not user.password_hash:
+                    continue
+                # External-only accounts have the sentinel hashed via bcrypt.
+                # A real local password will NOT match the sentinel.
+                if AuthService.verify_password(self._EXTERNAL_AUTH_SENTINEL, user.password_hash):
+                    continue  # external-only — skip
+                return True
+        return False
+
+    # ── TOTP data access (called by AuthService) ───────────────────────
+
+    async def set_totp(
+        self, user_id: UUID, secret: str, backup_codes_json: str
+    ) -> None:
+        """Enable TOTP for a user and store the secret + hashed backup codes."""
+        async with self._session_factory() as session:
+            repo = UserRepository(session)
+            user_obj = await repo.get_by_id(str(user_id))
+            if not user_obj:
+                raise NotFoundError("User", str(user_id))
+            user_obj.totp_secret = secret
+            user_obj.totp_enabled = True
+            user_obj.backup_codes = backup_codes_json
+            await session.commit()
+
+    async def clear_totp(self, user_id: UUID) -> None:
+        """Disable TOTP and clear all TOTP fields for a user."""
+        async with self._session_factory() as session:
+            repo = UserRepository(session)
+            user_obj = await repo.get_by_id(str(user_id))
+            if not user_obj:
+                raise NotFoundError("User", str(user_id))
+            user_obj.totp_secret = None
+            user_obj.totp_enabled = False
+            user_obj.backup_codes = None
+            await session.commit()
+
+    async def get_totp_fields(
+        self, user_id: UUID
+    ) -> tuple[str | None, bool, str | None]:
+        """Return (totp_secret, totp_enabled, backup_codes) for a user.
+
+        Returns (None, False, None) if user not found.
+        """
+        async with self._session_factory() as session:
+            repo = UserRepository(session)
+            user_obj = await repo.get_by_id(str(user_id))
+            if not user_obj:
+                return None, False, None
+            return user_obj.totp_secret, user_obj.totp_enabled, user_obj.backup_codes
+
+    async def consume_backup_code(
+        self, user_id: UUID, remaining_codes_json: str
+    ) -> None:
+        """Update the stored backup codes after one has been consumed."""
+        async with self._session_factory() as session:
+            repo = UserRepository(session)
+            user_obj = await repo.get_by_id(str(user_id))
+            if user_obj:
+                user_obj.backup_codes = remaining_codes_json
+                await session.commit()
+
+    async def build_user_context(
+        self, user_read: UserRead, tenants_service: TenantsService
+    ) -> UserContext:
+        """Build a UserContext with slug-keyed tenant roles.
+
+        Args:
+            user_read: The user's public schema data.
+            tenants_service: A TenantsService instance for resolving tenant slugs.
+        """
+        tenant_roles = await self.get_user_tenant_roles(user_read.id)
+        slug_roles: dict[str, RoleName] = {}
+        for tid, role in tenant_roles.items():
+            try:
+                tenant = await tenants_service.get_by_id(UUID(tid))
+                slug_roles[tenant.slug] = role
+            except NotFoundError:
+                pass  # tenant deleted; skip stale role
+
+        return UserContext(
+            user_id=user_read.id,
+            email=user_read.email,
+            display_name=user_read.display_name,
+            is_superadmin=user_read.is_superadmin,
+            tenant_roles=slug_roles,
+        )

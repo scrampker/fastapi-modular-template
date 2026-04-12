@@ -26,7 +26,6 @@ Session security:
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -125,31 +124,14 @@ def require_role(minimum: RoleName):
 
 # ── Lockout risk check ────────────────────────────────────────────────────
 
-_EXTERNAL_AUTH_SENTINEL = "_external_auth_no_password_"
-
 
 async def check_lockout_risk(registry) -> bool:
     """Return True if at least one active superadmin has a real local password.
 
     Used before disabling the 'local' auth provider to prevent full lockout.
-    An account is considered locally-accessible when its password_hash was NOT
-    set to the external-auth sentinel value.
+    Delegates to UsersService — no direct model/repository access.
     """
-    from sqlalchemy import select
-    from app.services.users.models import User
-
-    async with registry.users._session_factory() as session:
-        result = await session.scalars(
-            select(User).where(
-                User.is_superadmin == True,  # noqa: E712
-                User.is_active == True,  # noqa: E712
-            )
-        )
-        superadmins = result.all()
-        for user in superadmins:
-            if user.password_hash and user.password_hash != _EXTERNAL_AUTH_SENTINEL:
-                return True
-    return False
+    return await registry.users.has_local_password_superadmin()
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
@@ -161,6 +143,7 @@ async def _resolve_external_user(
     """Resolve an externally-authenticated email to a UserContext.
 
     Auto-provisions unknown users. Promotes ADMIN_EMAIL to superadmin.
+    All user operations go through UsersService — no direct model imports.
     """
     from app.services.audit.schemas import AuditLogCreate
 
@@ -176,22 +159,15 @@ async def _resolve_external_user(
                 display_name=email.split("@")[0].title(),
             )
         else:
-            # Create as inactive/pending — admin must assign to a tenant
-            async with registry.users._session_factory() as session:
-                from app.services.users.repository import UserRepository
-                from app.services.auth.service import AuthService
-                repo = UserRepository(session)
-                user = await repo.create(
-                    email=email,
-                    password_hash=AuthService.hash_password("_external_auth_no_password_"),
-                    display_name=email.split("@")[0].title(),
-                )
-                await session.commit()
-                user_read = await registry.users.get_by_email(email)
+            # Create as regular user — admin must assign to a tenant
+            user_read = await registry.users.create_external_user(
+                email=email,
+                display_name=email.split("@")[0].title(),
+            )
 
         await registry.audit.log(AuditLogCreate(
             user_id=user_read.id,
-            action=f"auth.external_provision",
+            action="auth.external_provision",
             target_type="user",
             target_id=str(user_read.id),
             detail={"provider": provider, "email": email},
@@ -204,32 +180,9 @@ async def _resolve_external_user(
         and email == settings.admin_email.strip().lower()
         and not user_read.is_superadmin
     ):
-        async with registry.users._session_factory() as session:
-            from app.services.users.repository import UserRepository
-            repo = UserRepository(session)
-            user_obj = await repo.get_by_email(email)
-            if user_obj:
-                await repo.update(user_obj, is_superadmin=True)
-                await session.commit()
+        await registry.users.promote_to_superadmin(email)
 
-    # Build tenant roles map
-    tenant_roles = await registry.users.get_user_tenant_roles(user_read.id)
-    # Map tenant_id -> slug for the context
-    slug_roles: dict[str, RoleName] = {}
-    for tid, role in tenant_roles.items():
-        try:
-            tenant = await registry.tenants.get_by_id(UUID(tid))
-            slug_roles[tenant.slug] = role
-        except Exception:
-            pass
-
-    return UserContext(
-        user_id=user_read.id,
-        email=user_read.email,
-        display_name=user_read.display_name,
-        is_superadmin=user_read.is_superadmin,
-        tenant_roles=slug_roles,
-    )
+    return await registry.users.build_user_context(user_read, registry.tenants)
 
 
 async def _resolve_jwt_user(registry, token: str) -> UserContext:
@@ -275,66 +228,36 @@ async def _resolve_jwt_user(registry, token: str) -> UserContext:
         except Exception:
             pass  # Never let timeout check crash auth for malformed iat
 
-    user_read = None
-    user_session_version = 0
-    async with registry.users._session_factory() as session:
-        from app.services.users.repository import UserRepository
-        repo = UserRepository(session)
-        user_obj = await repo.get_by_id(user_id)
-        if not user_obj or not user_obj.is_active:
-            raise AuthenticationError("User not found or inactive")
-        user_session_version = getattr(user_obj, "session_version", 0)
-        from app.services.users.schemas import UserRead
-        user_read = UserRead.model_validate(user_obj)
+    # Fetch user via service layer — no direct ORM access
+    user_read = await registry.users.get_by_id(UUID(user_id))
+    if not user_read or not user_read.is_active:
+        raise AuthenticationError("User not found or inactive")
 
     # ── Session version check ─────────────────────────────────────────
     token_sv = payload.get("sv", 0)
-    if token_sv < user_session_version:
+    if token_sv < user_read.session_version:
         raise AuthenticationError("Session invalidated — please log in again")
 
-    tenant_roles = await registry.users.get_user_tenant_roles(user_read.id)
-    slug_roles: dict[str, RoleName] = {}
-    for tid, role in tenant_roles.items():
-        try:
-            tenant = await registry.tenants.get_by_id(UUID(tid))
-            slug_roles[tenant.slug] = role
-        except Exception:
-            pass
-
-    return UserContext(
-        user_id=user_read.id,
-        email=user_read.email,
-        display_name=user_read.display_name,
-        is_superadmin=user_read.is_superadmin,
-        tenant_roles=slug_roles,
-    )
+    return await registry.users.build_user_context(user_read, registry.tenants)
 
 
 async def _resolve_api_key_user(registry, api_key: str) -> UserContext:
     """Resolve an API key to a UserContext scoped to that tenant.
 
-    Uses a SHA-256 prefix index for O(1) lookup before bcrypt verification,
-    avoiding the previous O(n*bcrypt) scan across all tenants.
+    Delegates the prefix-based O(1) lookup + bcrypt verification to
+    TenantsService — no direct repository or model imports.
     """
-    from app.services.auth.service import AuthService
-    from app.services.tenants.repository import TenantRepository
+    tenant = await registry.tenants.verify_api_key(api_key)
+    if tenant is None:
+        raise AuthenticationError("Invalid API key")
 
-    prefix = hashlib.sha256(api_key.encode()).hexdigest()[:16]
-
-    async with registry.tenants._session_factory() as session:
-        repo = TenantRepository(session)
-        tenant_obj = await repo.get_by_api_key_prefix(prefix)
-        if tenant_obj and tenant_obj.api_key_hash:
-            if AuthService.verify_api_key(api_key, tenant_obj.api_key_hash):
-                return UserContext(
-                    user_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    email=f"api@{tenant_obj.slug}",
-                    display_name=f"API ({tenant_obj.name})",
-                    is_superadmin=False,
-                    tenant_roles={tenant_obj.slug: RoleName.ADMIN},
-                )
-
-    raise AuthenticationError("Invalid API key")
+    return UserContext(
+        user_id=UUID("00000000-0000-0000-0000-000000000000"),
+        email=f"api@{tenant.slug}",
+        display_name=f"API ({tenant.name})",
+        is_superadmin=False,
+        tenant_roles={tenant.slug: RoleName.ADMIN},
+    )
 
 
 async def _resolve_dev_bypass_user(registry, settings) -> UserContext:
