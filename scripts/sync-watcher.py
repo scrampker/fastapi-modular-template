@@ -31,8 +31,7 @@ Env vars:
     SYNC_CLAUDE_MODEL   Model override (default: opus)
     SYNC_MAX_BUDGET     USD cap per run (default: 2.00)
     SYNC_AUTO_MERGE     Set to "1" to auto-merge sync branches (default: on)
-    SYNC_NOTIFY_EMAIL   Email for NEEDS_HUMAN alerts (default: none)
-    SYNC_NTFY_TOPIC     ntfy.sh topic for push notifications (default: none)
+    SYNC_HUBITAT_CONFIG  Path to hubitat JSON config (default: ~/.config/scottycore-hubitat.json)
 """
 
 import json
@@ -78,8 +77,10 @@ TMUX_TARGET = os.environ.get("SYNC_TMUX_TARGET")
 CLAUDE_MODEL = os.environ.get("SYNC_CLAUDE_MODEL", "opus")
 MAX_BUDGET = os.environ.get("SYNC_MAX_BUDGET", "2.00")
 AUTO_MERGE = os.environ.get("SYNC_AUTO_MERGE", "1") == "1"  # default ON
-NOTIFY_EMAIL = os.environ.get("SYNC_NOTIFY_EMAIL", "")
-NTFY_TOPIC = os.environ.get("SYNC_NTFY_TOPIC", "")
+HUBITAT_CONFIG = Path(os.environ.get(
+    "SYNC_HUBITAT_CONFIG",
+    os.path.expanduser("~/.config/scottycore-hubitat.json"),
+))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -422,54 +423,65 @@ def notify_tmux(message: str):
         pass
 
 
-def notify_email(subject: str, body: str):
-    """Send email alert via local postfix."""
-    if not NOTIFY_EMAIL:
+def notify_hubitat(message: str, priority: str = "P4"):
+    """Send push notification via Hubitat Maker API."""
+    if not HUBITAT_CONFIG.exists():
         return
     try:
+        config = json.loads(HUBITAT_CONFIG.read_text())
+        url = f"{config['url']}?access_token={config['access_token']}"
+        alarm = "true" if priority in ("P1", "P2") else "false"
+        payload = json.dumps({
+            "priority": priority,
+            "destination": "text",
+            "alarm": alarm,
+            "message": f"CLAUDE: {message}",
+        })
         proc = subprocess.run(
-            ["mail", "-s", f"[ScottyCore] {subject}", NOTIFY_EMAIL],
-            input=body, text=True, timeout=15, capture_output=True,
-        )
-        if proc.returncode == 0:
-            log(f"  Email sent to {NOTIFY_EMAIL}")
-        else:
-            log(f"  Email failed: {proc.stderr.strip()}")
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        log(f"  Email error: {e}")
-
-
-def notify_ntfy(title: str, body: str, priority: str = "default"):
-    """Send push notification via ntfy.sh (free, no signup required)."""
-    if not NTFY_TOPIC:
-        return
-    try:
-        proc = subprocess.run(
-            ["curl", "-s",
-             "-H", f"Title: {title}",
-             "-H", f"Priority: {priority}",
-             "-H", "Tags: robot",
-             "-d", body,
-             f"https://ntfy.sh/{NTFY_TOPIC}"],
+            ["curl", "-s", url, "-H", "Content-Type: application/json", "--data", payload],
             timeout=15, capture_output=True, text=True,
         )
-        if proc.returncode == 0:
-            log(f"  Push notification sent to ntfy.sh/{NTFY_TOPIC}")
+        if proc.returncode == 0 and '"result":"OK"' in proc.stdout:
+            log(f"  Hubitat notification sent")
         else:
-            log(f"  ntfy failed: {proc.stderr.strip()}")
+            log(f"  Hubitat failed: {proc.stdout[:200]}")
+    except (json.JSONDecodeError, KeyError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+        log(f"  Hubitat error: {e}")
+
+
+def create_github_issue(repo_path: str, title: str, body: str):
+    """Create a GitHub issue in the affected repo with sync-agent label."""
+    try:
+        # Ensure label exists (idempotent)
+        subprocess.run(
+            ["gh", "label", "create", "sync-agent",
+             "--description", "Created by ScottyCore sync watcher",
+             "--color", "d93f0b", "--force"],
+            cwd=repo_path, capture_output=True, text=True, timeout=15,
+        )
+        # Create issue
+        result = subprocess.run(
+            ["gh", "issue", "create",
+             "--title", title,
+             "--body", body,
+             "--label", "sync-agent"],
+            cwd=repo_path, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            issue_url = result.stdout.strip()
+            log(f"  GitHub issue created: {issue_url}")
+            return issue_url
+        else:
+            log(f"  gh issue create failed: {result.stderr.strip()}")
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        log(f"  ntfy error: {e}")
+        log(f"  GitHub issue error: {e}")
+    return None
 
 
-def notify_all(message: str, body: str = "", priority: str = "default"):
+def notify_all(message: str, body: str = "", priority: str = "P4"):
     """Send notification via all configured channels."""
     notify_tmux(message)
-    if body:
-        notify_email(message, body)
-        notify_ntfy(message, body, priority)
-    else:
-        notify_email(message, message)
-        notify_ntfy(message, message, priority)
+    notify_hubitat(body or message, priority)
 
 
 def tail_reports():
@@ -660,9 +672,9 @@ def _main_inner(args: list, dry_run: bool, force: bool, report_only: bool):
         log(f"  Output: {output[:500]}")
         save_state(new_state)
         notify_all(
-            f"AGENT ERROR on {repos_list}",
-            f"Sync agent failed (exit {returncode}) processing {total} commits in {repos_list}.\n\n{output[:1000]}",
-            priority="high",
+            f"Sync agent error ({repos_list})",
+            f"Sync agent failed (exit {returncode}) processing {total} commits in {repos_list}.\n\n{output[:500]}",
+            priority="P2",
         )
         return
 
@@ -670,17 +682,41 @@ def _main_inner(args: list, dry_run: bool, force: bool, report_only: bool):
 
     # ── Check if agent flagged anything as needing human intervention ────
     if "NEEDS_HUMAN" in output:
-        # Extract the NEEDS_HUMAN lines from the output
         needs_human_lines = [
             line.strip() for line in output.split("\n")
             if "NEEDS_HUMAN" in line
         ]
         reason = "\n".join(needs_human_lines) or "Agent flagged manual intervention needed"
         log(f"  NEEDS_HUMAN flagged: {reason}")
+
+        # Create GitHub issues in affected repos
+        issue_body = (
+            f"## Sync Agent Needs Help\n\n"
+            f"The automated sync watcher processed commits in **{repos_list}** "
+            f"but couldn't complete the sync autonomously.\n\n"
+            f"### What the agent said\n\n{reason}\n\n"
+            f"### Source commits\n\n"
+        )
+        for repo_name, info in changes.items():
+            for c in info["commits"]:
+                issue_body += f"- `{repo_name}` {c['sha'][:8]} {c['subject']}\n"
+        issue_body += (
+            f"\n### What to do\n\n"
+            f"Open a Claude Code session in the affected repo and resolve manually. "
+            f"Close this issue when done.\n\n"
+            f"---\n*Created by sync-watcher.py*"
+        )
+
+        # Create issue in scottycore (central) and any target repos that have pending branches
+        issue_urls = []
+        url = create_github_issue(str(CORE_DIR), f"sync-agent: needs human — {repos_list}", issue_body)
+        if url:
+            issue_urls.append(url)
+
         notify_all(
-            f"ACTION REQUIRED: sync for {repos_list}",
-            f"The sync agent processed {total} commits in {repos_list} but needs your help:\n\n{reason}\n\nOpen a Claude session in /script/scottycore to review.",
-            priority="urgent",
+            f"Sync needs your attention ({repos_list})",
+            f"Sync agent needs help with {repos_list}. {reason}. GitHub issue created.",
+            priority="P2",
         )
 
     # ── Check for sync branches created ──────────────────────────────────
