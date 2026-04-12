@@ -29,8 +29,10 @@ Usage:
 Env vars:
     SYNC_TMUX_TARGET    tmux pane for notifications (e.g. "main:0.1")
     SYNC_CLAUDE_MODEL   Model override (default: opus)
-    SYNC_MAX_BUDGET     USD cap per run (default: 0.50)
-    SYNC_AUTO_MERGE     Set to "1" to auto-merge sync branches (default: off)
+    SYNC_MAX_BUDGET     USD cap per run (default: 2.00)
+    SYNC_AUTO_MERGE     Set to "1" to auto-merge sync branches (default: on)
+    SYNC_NOTIFY_EMAIL   Email for NEEDS_HUMAN alerts (default: none)
+    SYNC_NTFY_TOPIC     ntfy.sh topic for push notifications (default: none)
 """
 
 import json
@@ -75,7 +77,9 @@ LOCK_FILE = CORE_DIR / "data" / "sync-watcher.lock"
 TMUX_TARGET = os.environ.get("SYNC_TMUX_TARGET")
 CLAUDE_MODEL = os.environ.get("SYNC_CLAUDE_MODEL", "opus")
 MAX_BUDGET = os.environ.get("SYNC_MAX_BUDGET", "2.00")
-AUTO_MERGE = os.environ.get("SYNC_AUTO_MERGE", "0") == "1"
+AUTO_MERGE = os.environ.get("SYNC_AUTO_MERGE", "1") == "1"  # default ON
+NOTIFY_EMAIL = os.environ.get("SYNC_NOTIFY_EMAIL", "")
+NTFY_TOPIC = os.environ.get("SYNC_NTFY_TOPIC", "")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -274,7 +278,14 @@ You have full write access to all repos. When you identify a fix that should pro
    - ScottyScan: PowerShell scanner + webapp, usually only webapp is relevant
 4. **Commit**: `git -C <repo_path> add -A && git -C <repo_path> commit -m "sync: <description> (from <source>)"`
 5. **Switch back**: `git -C <repo_path> checkout <default_branch>`
-{"6. **Auto-merge**: If the fix is low-risk (no schema changes, no API changes, pure bug fix), merge the sync branch into the default branch." if AUTO_MERGE else "6. **Leave the branch** for the user to review and merge."}
+{'''6. **Auto-merge + push**: After committing on the sync branch, merge it into the default branch and push:
+   ```
+   git -C <repo_path> checkout <default_branch>
+   git -C <repo_path> merge sync/<branch_name> --no-edit
+   git -C <repo_path> branch -d sync/<branch_name>
+   git -C <repo_path> push origin <default_branch>
+   ```
+   EXCEPTION: If the fix touches database schemas, API contracts, or you are uncertain — leave the sync branch unmerged and tag the report with `NEEDS_HUMAN: <reason>`. The watcher will send a notification.''' if AUTO_MERGE else "6. **Leave the branch** for the user to review and merge."}
 
 PATTERN ADOPTION MANIFESTS:
 Each target repo above lists `adopted` and `ignored` patterns from its `.scottycore-patterns.yaml`.
@@ -411,6 +422,56 @@ def notify_tmux(message: str):
         pass
 
 
+def notify_email(subject: str, body: str):
+    """Send email alert via local postfix."""
+    if not NOTIFY_EMAIL:
+        return
+    try:
+        proc = subprocess.run(
+            ["mail", "-s", f"[ScottyCore] {subject}", NOTIFY_EMAIL],
+            input=body, text=True, timeout=15, capture_output=True,
+        )
+        if proc.returncode == 0:
+            log(f"  Email sent to {NOTIFY_EMAIL}")
+        else:
+            log(f"  Email failed: {proc.stderr.strip()}")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        log(f"  Email error: {e}")
+
+
+def notify_ntfy(title: str, body: str, priority: str = "default"):
+    """Send push notification via ntfy.sh (free, no signup required)."""
+    if not NTFY_TOPIC:
+        return
+    try:
+        proc = subprocess.run(
+            ["curl", "-s",
+             "-H", f"Title: {title}",
+             "-H", f"Priority: {priority}",
+             "-H", "Tags: robot",
+             "-d", body,
+             f"https://ntfy.sh/{NTFY_TOPIC}"],
+            timeout=15, capture_output=True, text=True,
+        )
+        if proc.returncode == 0:
+            log(f"  Push notification sent to ntfy.sh/{NTFY_TOPIC}")
+        else:
+            log(f"  ntfy failed: {proc.stderr.strip()}")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        log(f"  ntfy error: {e}")
+
+
+def notify_all(message: str, body: str = "", priority: str = "default"):
+    """Send notification via all configured channels."""
+    notify_tmux(message)
+    if body:
+        notify_email(message, body)
+        notify_ntfy(message, body, priority)
+    else:
+        notify_email(message, message)
+        notify_ntfy(message, message, priority)
+
+
 def tail_reports():
     """Tail mode for a dedicated tmux pane."""
     print("=" * 60)
@@ -472,7 +533,7 @@ def run_drift_report(write_to_file: bool):
         out_file = out_dir / f"drift_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
         out_file.write_text(report)
         log(f"Drift report written: {out_file}")
-        notify_tmux(f"Drift report ready: {out_file.name}")
+        notify_all(f"Drift report ready: {out_file.name}")
     else:
         print(report)
 
@@ -597,12 +658,30 @@ def _main_inner(args: list, dry_run: bool, force: bool, report_only: bool):
     if returncode != 0:
         log(f"  Agent exited with code {returncode}")
         log(f"  Output: {output[:500]}")
-        # Still save state so we don't re-process the same commits
         save_state(new_state)
-        notify_tmux(f"AGENT ERROR on {repos_list}")
+        notify_all(
+            f"AGENT ERROR on {repos_list}",
+            f"Sync agent failed (exit {returncode}) processing {total} commits in {repos_list}.\n\n{output[:1000]}",
+            priority="high",
+        )
         return
 
     log(f"Agent completed. Output length: {len(output)} chars")
+
+    # ── Check if agent flagged anything as needing human intervention ────
+    if "NEEDS_HUMAN" in output:
+        # Extract the NEEDS_HUMAN lines from the output
+        needs_human_lines = [
+            line.strip() for line in output.split("\n")
+            if "NEEDS_HUMAN" in line
+        ]
+        reason = "\n".join(needs_human_lines) or "Agent flagged manual intervention needed"
+        log(f"  NEEDS_HUMAN flagged: {reason}")
+        notify_all(
+            f"ACTION REQUIRED: sync for {repos_list}",
+            f"The sync agent processed {total} commits in {repos_list} but needs your help:\n\n{reason}\n\nOpen a Claude session in /script/scottycore to review.",
+            priority="urgent",
+        )
 
     # ── Check for sync branches created ──────────────────────────────────
     pending = check_sync_branches()
@@ -612,10 +691,13 @@ def _main_inner(args: list, dry_run: bool, force: bool, report_only: bool):
         for repo, branches in pending.items():
             for b in branches:
                 log(f"  {repo}: {b}")
-        notify_tmux(f"{branch_count} sync branch(es) ready for review")
+        if AUTO_MERGE:
+            notify_all(f"{branch_count} sync branch(es) pending — auto-merge is on but agent left branches (may need review)")
+        else:
+            notify_all(f"{branch_count} sync branch(es) ready for review")
     else:
-        log("No sync branches created (no cross-app fixes needed or report-only mode)")
-        notify_tmux(f"Checked {total} commits — no sync needed")
+        log("No sync branches created (changes applied directly or no cross-app fixes needed)")
+        notify_all(f"Checked {total} commits — sync complete")
 
     # ── Ensure all repos are back on default branch ──────────────────────
     for repo_name, config in REPOS.items():
