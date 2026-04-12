@@ -29,7 +29,7 @@ Usage:
 Env vars:
     SYNC_TMUX_TARGET    tmux pane for notifications (e.g. "main:0.1")
     SYNC_CLAUDE_MODEL   Model override (default: opus)
-    SYNC_MAX_BUDGET     USD cap per run (default: 2.00)
+    SYNC_MAX_BUDGET     USD cap per run (default: 20.00)
     SYNC_AUTO_MERGE     Set to "1" to auto-merge sync branches (default: on)
     SYNC_HUBITAT_CONFIG  Path to hubitat JSON config (default: ~/.config/scottycore-hubitat.json)
 """
@@ -67,7 +67,7 @@ LOCK_FILE = CORE_DIR / "data" / "sync-watcher.lock"
 
 TMUX_TARGET = os.environ.get("SYNC_TMUX_TARGET")
 CLAUDE_MODEL = os.environ.get("SYNC_CLAUDE_MODEL", "opus")
-MAX_BUDGET = os.environ.get("SYNC_MAX_BUDGET", "2.00")
+MAX_BUDGET = os.environ.get("SYNC_MAX_BUDGET", "20.00")
 AUTO_MERGE = os.environ.get("SYNC_AUTO_MERGE", "1") == "1"  # default ON
 HUBITAT_CONFIG = Path(os.environ.get(
     "SYNC_HUBITAT_CONFIG",
