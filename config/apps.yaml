@@ -45,3 +45,8 @@ scottomation:
   # IFTTT-scale automation platform with ScottyScript DSL.
   # Runs as Docker container or Home Assistant add-on.
   # v1 scope: Home Assistant automations via connector architecture.
+
+scottysync:
+  path: /script/scottysync
+  stack: FastAPI
+  branch: master
