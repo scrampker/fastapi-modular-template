@@ -354,6 +354,27 @@ def inject_claude_section(app_path: Path) -> bool:
 # ── Step 6: Commit + push ───────────────────────────────────────────────────
 
 
+def install_promote_scan_workflow(app_path: Path, app_name: str) -> bool:
+    """Install the server-side promote-scan.yml workflow in the app repo.
+
+    Runs on every push to master, classifies the diff for scottycore-worthy
+    extraction candidates, and dispatches scottycore's promote-receive.yml
+    when appropriate. The authoritative path for upward sync — the local
+    pre-commit nudge is only an early warning.
+    """
+    src = CORE_DIR / ".claude" / "templates" / "promote-scan.yml"
+    workflows_dir = app_path / ".forgejo" / "workflows"
+    dest = workflows_dir / "promote-scan.yml"
+
+    if not src.exists():
+        print(f"  template missing at {src}")
+        return False
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    dest.write_text(src.read_text())
+    print(f"  installed .forgejo/workflows/promote-scan.yml in {app_name}")
+    return True
+
+
 def install_promote_nudge_hook(app_path: Path, app_name: str) -> bool:
     """Install the pre-commit /promote nudge hook into the app's .git/hooks.
 
@@ -738,9 +759,13 @@ def main():
     print(f"\nStep 5: Inject ScottyCore section into CLAUDE.md")
     inject_claude_section(app_path)
 
-    # Step 6: Install /promote nudge hook
-    print(f"\nStep 6: Install pre-commit /promote nudge hook")
+    # Step 6a: Install pre-commit nudge hook (early-warning, local)
+    print(f"\nStep 6a: Install pre-commit /promote nudge hook")
     install_promote_nudge_hook(app_path, app_name)
+
+    # Step 6b: Install server-side promote-scan workflow (authoritative)
+    print(f"\nStep 6b: Install promote-scan.yml workflow")
+    install_promote_scan_workflow(app_path, app_name)
 
     # Step 7: Commit + push app changes
     print(f"\nStep 7: Commit and push app changes")

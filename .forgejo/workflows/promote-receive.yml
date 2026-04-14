@@ -1,0 +1,433 @@
+name: promote-receive
+
+# Triggered by workflow_dispatch from an app's promote-scan.yml.
+# Extracts the proposed code into scottycore, opens an extraction PR,
+# invokes the scottycore-manager agent for autonomous classification,
+# and on GREEN/YELLOW auto-bumps and tags (firing the existing release
+# workflow). Posts a commit comment back on the originating app.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_app:
+        description: 'Originating app repo name (e.g. scottyscan)'
+        required: true
+        type: string
+      source_commit:
+        description: 'Commit SHA that triggered the promotion'
+        required: true
+        type: string
+      target_path:
+        description: 'Path in the source app to extract'
+        required: true
+        type: string
+      reason:
+        description: 'Classifier rationale'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  FORGEJO_BASE: https://forgejo.scotty.consulting
+  SELF_REPO: scotty/scottycore
+
+jobs:
+  extract:
+    runs-on: [self-hosted, linux]
+    container:
+      image: scottycore-runner:latest
+      options: >-
+        -v /root/.claude:/root/.claude
+        -v /root/.claude.json:/root/.claude.json
+        -v /root/.config/scottycore-hubitat.json:/root/.config/scottycore-hubitat.json:ro
+    env:
+      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+    steps:
+      - name: checkout scottycore master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.FORGEJO_TOKEN }}
+
+      - name: configure git
+        run: |
+          git config user.name "scottycore-bot"
+          git config user.email "bot@scotty.consulting"
+          git config --global --add safe.directory "$PWD"
+
+      - name: clone source app at the triggering commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/source
+          git clone "$FORGEJO_BASE/scotty/${{ inputs.source_app }}.git" /tmp/source/app
+          git -C /tmp/source/app checkout "${{ inputs.source_commit }}"
+          echo "--- target path contents ---"
+          head -c 2000 "/tmp/source/app/${{ inputs.target_path }}" 2>&1 || echo "(target is a directory or non-text)"
+
+      - name: create extraction branch
+        id: branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${{ inputs.source_commit }}"
+          SHORT_SHA="${SHORT_SHA:0:8}"
+          BRANCH="promote/${{ inputs.source_app }}-${SHORT_SHA}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          # Idempotent: force-delete any stale branch on remote
+          BRANCH_ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$BRANCH")
+          curl -sS -X DELETE -H "Authorization: token $FORGEJO_TOKEN" \
+            -o /dev/null -w "stale-branch cleanup: HTTP %{http_code}\n" \
+            "$FORGEJO_BASE/api/v1/repos/$SELF_REPO/branches/$BRANCH_ENC" || true
+          git switch -c "$BRANCH"
+
+      - name: agent extraction
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/review
+          echo "${{ inputs.reason }}" > /tmp/review/classifier-reason.txt
+
+          # Capture a diff of the source commit for the manager agent to review
+          git -C /tmp/source/app show --no-color "${{ inputs.source_commit }}" \
+            > /tmp/review/source-diff.patch 2>&1 || echo "(no diff)" > /tmp/review/source-diff.patch
+
+          PROMPT=$(cat <<PROMPT
+          You are performing an autonomous extraction from a Scotty-family app into the shared scottycore library.
+
+          Source app: ${{ inputs.source_app }} (checked out at /tmp/source/app)
+          Source commit: ${{ inputs.source_commit }}
+          Target path in source: ${{ inputs.target_path }}
+          Classifier reason: ${{ inputs.reason }}
+
+          Your working directory is scottycore's repo root. Current branch is a fresh extraction branch.
+
+          Procedure:
+          1. Read the file(s) at /tmp/source/app/${{ inputs.target_path }}
+          2. Decide the scottycore home. Categories: middleware, util, notify, security, services/<domain>. Pick the most natural.
+          3. Create scottycore/<category>/<name>.py with app-specific names stripped:
+             - ScribeRateLimiter -> RateLimiter, etc.
+             - Imports must only use stdlib, scottycore modules, or deps already in scottycore's pyproject.toml
+          4. Create a test at tests/<category>/test_<name>.py with at least one real assertion (not just "assert True").
+          5. Update scottycore/<category>/__init__.py to re-export the public API.
+          6. Do NOT touch pyproject.toml version — the workflow handles that.
+          7. Do NOT commit — just write the files.
+
+          If the extraction is unsafe (e.g. the source code has tight coupling to app-specific concepts that can't be cleanly lifted), instead write a single file at /tmp/review/ABORT.md explaining why, and do not create any scottycore files. The workflow will detect this and close the PR as rejected.
+
+          When done, print exactly this on the last line of stdout: EXTRACTION_DONE
+          PROMPT
+          )
+
+          set +e
+          claude -p "$PROMPT" --output-format json --permission-mode acceptEdits > /tmp/review/claude-raw.json 2>&1
+          CLAUDE_EXIT=$?
+          set -e
+          echo "--- claude exit: $CLAUDE_EXIT ---"
+          head -c 3000 /tmp/review/claude-raw.json
+          echo
+
+          if [ -f /tmp/review/ABORT.md ]; then
+            echo "aborted=true" >> "$GITHUB_OUTPUT"
+            echo "--- ABORT reason ---"
+            cat /tmp/review/ABORT.md
+            exit 0
+          fi
+
+          # Verify something was created
+          if ! git status --porcelain | grep -q .; then
+            echo "aborted=true" >> "$GITHUB_OUTPUT"
+            echo "agent did not create any files; treating as abort" > /tmp/review/ABORT.md
+            exit 0
+          fi
+          echo "aborted=false" >> "$GITHUB_OUTPUT"
+
+      - name: abort handling
+        if: steps.extract.outputs.aborted == 'true'
+        shell: bash
+        run: |
+          REASON=$(cat /tmp/review/ABORT.md 2>/dev/null || echo "extraction agent aborted")
+          # Post a commit comment on the source app
+          BODY=$(python3 -c "
+          import json
+          msg = '''**scottycore extraction rejected**
+
+          Path: ${{ inputs.target_path }}
+          Reason: $REASON
+
+          This path will NOT be extracted into scottycore. The original code stays in place.'''
+          print(json.dumps({'body': msg}))
+          ")
+          curl -fsSL -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$FORGEJO_BASE/api/v1/repos/scotty/${{ inputs.source_app }}/commits/${{ inputs.source_commit }}/comments" \
+            --data "$BODY" || true
+          notify-hubitat P3 "scottycore extraction rejected for ${{ inputs.source_app }} ${{ inputs.target_path }}" || true
+          exit 0
+
+      - name: run CI on extraction
+        id: ci
+        if: steps.extract.outputs.aborted == 'false'
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 -m pip install --break-system-packages --quiet -e ".[dev]" 2>&1 | tail -3
+          set +e
+          pytest -q 2>&1 | tee /tmp/review/pytest.log
+          PYTEST_EXIT=$?
+          ruff check scottycore tests 2>&1 | tee /tmp/review/ruff.log
+          RUFF_EXIT=$?
+          echo "ci_green=$([ "$PYTEST_EXIT" = "0" ] && [ "$RUFF_EXIT" = "0" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: commit + push extraction branch
+        if: steps.extract.outputs.aborted == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git commit -m "feat: extract ${{ inputs.target_path }} from ${{ inputs.source_app }}
+
+          Auto-extraction proposed by ${{ inputs.source_app }}@${{ inputs.source_commit }}.
+          Classifier reason: ${{ inputs.reason }}.
+
+          Review comment from scottycore-manager agent will follow."
+          git push origin "${{ steps.branch.outputs.branch }}"
+
+      - name: open extraction PR
+        id: pr
+        if: steps.extract.outputs.aborted == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SRC_APP="${{ inputs.source_app }}"
+          export SRC_COMMIT="${{ inputs.source_commit }}"
+          export TGT_PATH="${{ inputs.target_path }}"
+          export REASON="${{ inputs.reason }}"
+          export HEAD_REF="${{ steps.branch.outputs.branch }}"
+          export CI_GREEN="${{ steps.ci.outputs.ci_green }}"
+
+          python3 <<'PY' > /tmp/pr-request.json
+          import json, os
+          body = f"""Auto-extraction from {os.environ['SRC_APP']}@{os.environ['SRC_COMMIT'][:8]}.
+
+          - Source path: `{os.environ['TGT_PATH']}`
+          - Classifier reason: {os.environ['REASON']}
+          - CI green: {os.environ['CI_GREEN']}
+
+          The scottycore-manager agent will post a classification (GREEN/YELLOW/RED)
+          below. On GREEN/YELLOW this PR auto-merges + cuts a release. On RED it
+          stays open for human review.
+          """
+          print(json.dumps({
+              "title": f"promote: {os.environ['TGT_PATH']} from {os.environ['SRC_APP']}",
+              "body": body,
+              "head": os.environ["HEAD_REF"],
+              "base": "master",
+          }))
+          PY
+
+          curl -fsSL -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$FORGEJO_BASE/api/v1/repos/$SELF_REPO/pulls" \
+            --data @/tmp/pr-request.json \
+            > /tmp/pr-response.json
+
+          python3 <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open("/tmp/pr-response.json") as f:
+              data = json.loads(f.read(), strict=False)
+          print(f"number={data['number']}")
+          print(f"url={data['html_url']}")
+          PY
+
+      - name: manager agent review
+        id: review
+        if: steps.extract.outputs.aborted == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROMPT=$(cat <<PROMPT
+          You are the scottycore-manager agent (.claude/agents/scottycore-manager.md).
+
+          An extraction PR has been opened (branch: ${{ steps.branch.outputs.branch }}).
+
+          Inputs in the working directory / environment:
+          - /tmp/review/source-diff.patch — original commit in source app
+          - /tmp/review/classifier-reason.txt — classifier rationale
+          - /tmp/review/pytest.log — scottycore tests
+          - /tmp/review/ruff.log — lint output
+          - Current git branch diff vs master = the extraction
+
+          CI green: ${{ steps.ci.outputs.ci_green }}
+
+          Follow the procedure in your agent definition. Classify as GREEN / YELLOW / RED.
+          Output ONLY a single JSON object:
+          {"classification":"GREEN|YELLOW|RED","comment":"...","bump":"patch|minor|major","follow_up_issue":""}
+          PROMPT
+          )
+
+          set +e
+          claude -p "$PROMPT" --output-format json > /tmp/review/classify-raw.json 2>&1
+          set -e
+          head -c 3000 /tmp/review/classify-raw.json
+          echo
+
+          python3 <<'PY' >> "$GITHUB_OUTPUT"
+          import json, re, os, sys
+
+          def write(cls, comment, bump, fu=""):
+              with open("/tmp/review/comment.md","w") as f: f.write(comment)
+              with open("/tmp/review/followup.txt","w") as f: f.write(fu)
+              print(f"class={cls}")
+              print(f"bump={bump}")
+
+          try:
+              raw = open("/tmp/review/classify-raw.json").read()
+              try:
+                  env = json.loads(raw)
+                  text = env.get("result") or raw
+              except json.JSONDecodeError:
+                  text = raw
+              m = re.search(r'\{[\s\S]+\}', text)
+              if not m: raise ValueError("no JSON in response")
+              obj = json.loads(m.group(), strict=False)
+              cls = (obj.get("classification") or "").upper()
+              if cls not in ("GREEN","YELLOW","RED"): raise ValueError(f"bad class {cls!r}")
+              bump = (obj.get("bump") or "minor").lower()
+              if bump not in ("patch","minor","major"): bump = "minor"
+              write(cls, obj.get("comment",""), bump, obj.get("follow_up_issue",""))
+          except Exception as e:
+              write("RED", f"Manager agent parse failed — defaulting to RED.\n\n```\n{e}\n```", "minor", "")
+          PY
+
+      - name: post classification comment
+        if: steps.extract.outputs.aborted == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR="${{ steps.pr.outputs.number }}"
+          CLASS="${{ steps.review.outputs.class }}"
+          COMMENT=$(cat /tmp/review/comment.md)
+          FULL="**[$CLASS]** scottycore-manager classification\n\n$COMMENT"
+          BODY=$(python3 -c "import json,sys;print(json.dumps({'body':sys.argv[1]}))" "$FULL")
+          curl -fsSL -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$FORGEJO_BASE/api/v1/repos/$SELF_REPO/issues/$PR/comments" \
+            --data "$BODY" > /dev/null
+
+      - name: act on classification
+        id: act
+        if: steps.extract.outputs.aborted == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR="${{ steps.pr.outputs.number }}"
+          PR_URL="${{ steps.pr.outputs.url }}"
+          CLASS="${{ steps.review.outputs.class }}"
+          BUMP="${{ steps.review.outputs.bump }}"
+
+          merge() {
+            curl -fsSL -X POST \
+              -H "Authorization: token $FORGEJO_TOKEN" \
+              -H "Content-Type: application/json" \
+              "$FORGEJO_BASE/api/v1/repos/$SELF_REPO/pulls/$PR/merge" \
+              -d '{"Do":"squash"}'
+          }
+
+          bump_and_tag() {
+            CUR=$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+            NEW=$(python3 -c "
+          c='$CUR'.split('.')
+          maj,mino,pat=int(c[0]),int(c[1]),int(c[2])
+          if '$BUMP'=='major': maj+=1; mino=0; pat=0
+          elif '$BUMP'=='minor': mino+=1; pat=0
+          else: pat+=1
+          print(f'{maj}.{mino}.{pat}')
+          ")
+            echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
+            # Pull merged master, bump version, push, tag
+            git fetch origin master
+            git checkout master
+            git pull --ff-only origin master
+            python3 -c "
+          import re,pathlib
+          for p in ['pyproject.toml','scottycore/__init__.py']:
+            t=pathlib.Path(p).read_text()
+            t=re.sub(r'(version\s*=\s*[\"\\'])[0-9]+\.[0-9]+\.[0-9]+([\"\\'])', r'\g<1>$NEW\g<2>', t)
+            t=re.sub(r'(__version__\s*=\s*[\"\\'])[0-9]+\.[0-9]+\.[0-9]+([\"\\'])', r'\g<1>$NEW\g<2>', t)
+            pathlib.Path(p).write_text(t)
+          "
+            git add pyproject.toml scottycore/__init__.py
+            git commit -m "chore: bump to v$NEW (extraction from ${{ inputs.source_app }})"
+            git push origin master
+            git tag -a "v$NEW" -m "scottycore v$NEW"
+            git push origin "v$NEW"
+            echo "tagged v$NEW"
+          }
+
+          case "$CLASS" in
+            GREEN)
+              echo "GREEN — auto-merge + $BUMP bump"
+              merge
+              bump_and_tag
+              ;;
+            YELLOW)
+              echo "YELLOW — auto-merge + $BUMP bump + follow-up issue"
+              merge
+              bump_and_tag
+              FU=$(cat /tmp/review/followup.txt)
+              if [ -n "$FU" ] && [ "$FU" != "null" ]; then
+                python3 -c "
+          import json,os
+          print(json.dumps({'title': os.environ['FU'], 'body': 'Follow-up on extraction PR #${{ steps.pr.outputs.number }}'}))
+          " FU="$FU" > /tmp/iss.json
+                curl -fsSL -X POST \
+                  -H "Authorization: token $FORGEJO_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  "$FORGEJO_BASE/api/v1/repos/$SELF_REPO/issues" \
+                  --data @/tmp/iss.json > /dev/null || true
+              fi
+              ;;
+            RED|*)
+              echo "RED — leaving PR open, firing alert"
+              notify-hubitat P2 "scottycore extraction PR needs review: $PR_URL" || true
+              ;;
+          esac
+
+      - name: comment back on source commit
+        if: steps.extract.outputs.aborted == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLASS="${{ steps.review.outputs.class }}"
+          NEW="${{ steps.act.outputs.new_version }}"
+          PR_URL="${{ steps.pr.outputs.url }}"
+
+          if [ "$CLASS" = "GREEN" ] || [ "$CLASS" = "YELLOW" ]; then
+            MSG="**Extracted into scottycore v${NEW}** ([PR](${PR_URL}))
+
+            Your contribution was lifted into the shared library. A bump PR for v${NEW}
+            will arrive on this repo shortly — it'll propose removing the local copy
+            and importing from scottycore. Other Scotty apps will also receive upgrade
+            PRs for v${NEW}."
+          else
+            MSG="**Extraction flagged RED — human review needed**
+
+            The scottycore-manager agent classified the extraction PR as RED.
+            See [${PR_URL}](${PR_URL}). The local code in this commit was NOT removed."
+          fi
+          BODY=$(python3 -c "import json,sys;print(json.dumps({'body':sys.argv[1]}))" "$MSG")
+          curl -fsSL -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$FORGEJO_BASE/api/v1/repos/scotty/${{ inputs.source_app }}/commits/${{ inputs.source_commit }}/comments" \
+            --data "$BODY" || true

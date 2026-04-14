@@ -1,0 +1,133 @@
+name: promote-scan
+
+# On every push to master, scan the new commit's diff for code that
+# looks like it belongs in the shared scottycore library. If the
+# classifier agent says PROMOTE, dispatch scottycore's promote-receive
+# workflow to perform the extraction.
+#
+# This workflow is generic across all Scotty apps. Installed by
+# scottycore-init.py. Safe to re-install (overwrites in place).
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+env:
+  FORGEJO_BASE: https://forgejo.scotty.consulting
+  # Skip scanning if the commit author is the scottycore-bot itself
+  # (prevents loops when a bump PR merges back into master)
+  BOT_EMAIL: bot@scotty.consulting
+
+jobs:
+  scan:
+    runs-on: [self-hosted, linux]
+    container:
+      image: scottycore-runner:latest
+      options: >-
+        -v /root/.claude:/root/.claude
+        -v /root/.claude.json:/root/.claude.json
+    env:
+      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.FORGEJO_TOKEN }}
+
+      - name: skip if bot commit
+        id: skip
+        shell: bash
+        run: |
+          AUTHOR_EMAIL=$(git log -1 --format='%ae' HEAD)
+          echo "author=$AUTHOR_EMAIL"
+          if [ "$AUTHOR_EMAIL" = "$BOT_EMAIL" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: classify diff
+        id: classify
+        if: steps.skip.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIFF=$(git diff --no-color -U0 HEAD^..HEAD -- '*.py' 2>/dev/null || true)
+          if [ -z "$DIFF" ]; then
+            echo "no Python changes"
+            echo "promote=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PROMPT='You are a terse classifier. Decide whether the added code in the diff below belongs in the shared scottycore library (a cross-app framework with auth, tenants, audit, settings, middleware, utilities, notify helpers, etc.).
+
+          Look for: middleware, utilities, security helpers, config patterns, notification helpers — things not tied to an app-specific domain.
+
+          Be strict. Domain handlers, parsers, scan modules, scribe logic, sync protocols are NOT candidates.
+
+          Output ONE line, no prose:
+            PROMOTE <path> — <short reason>
+          OR
+            KEEP
+
+          Diff:
+          '"$DIFF"
+
+          set +e
+          claude -p "$PROMPT" --output-format json > /tmp/raw.json 2>&1
+          set -e
+
+          RESULT=$(python3 -c "
+          import json, sys
+          try:
+              env = json.load(open('/tmp/raw.json'))
+              print((env.get('result') or '').strip().splitlines()[0] if (env.get('result') or '').strip() else 'KEEP')
+          except Exception:
+              print('KEEP')
+          ")
+          echo "raw-result: $RESULT"
+
+          if echo "$RESULT" | grep -q '^PROMOTE '; then
+            PATH_PART=$(echo "$RESULT" | sed -E 's/^PROMOTE +([^ ]+).*/\1/')
+            REASON=$(echo "$RESULT" | sed -E 's/^PROMOTE +[^ ]+ *[—-]+ *//')
+            echo "promote=true" >> "$GITHUB_OUTPUT"
+            echo "path=$PATH_PART" >> "$GITHUB_OUTPUT"
+            echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          else
+            echo "promote=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: dispatch to scottycore/promote-receive
+        if: steps.skip.outputs.skip == 'false' && steps.classify.outputs.promote == 'true'
+        shell: bash
+        env:
+          REPO_FULL: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          TGT_PATH: ${{ steps.classify.outputs.path }}
+          REASON: ${{ steps.classify.outputs.reason }}
+        run: |
+          set -euo pipefail
+          REPO_NAME=$(basename "$REPO_FULL")
+          export REPO_NAME
+          python3 <<'PY' > /tmp/payload.json
+          import json, os
+          print(json.dumps({
+            "ref": "master",
+            "inputs": {
+              "source_app": os.environ["REPO_NAME"],
+              "source_commit": os.environ["COMMIT_SHA"],
+              "target_path": os.environ["TGT_PATH"],
+              "reason": os.environ["REASON"],
+            }
+          }))
+          PY
+          curl -fsSL -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$FORGEJO_BASE/api/v1/repos/scotty/scottycore/actions/workflows/promote-receive.yml/dispatches" \
+            --data @/tmp/payload.json
+          echo "dispatched: $REPO_NAME $TGT_PATH"
