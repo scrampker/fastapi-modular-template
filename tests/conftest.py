@@ -8,7 +8,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from scottycore.core.database import Base, get_db
+from scottycore.core.database import Base, get_db_session
 from scottycore.main import app
 
 # ---------------------------------------------------------------------------
@@ -69,10 +69,10 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     """AsyncClient with the test DB injected via FastAPI dependency override."""
 
-    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+    async def override_get_db_session() -> AsyncGenerator[AsyncSession, None]:
         yield db_session
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_db_session] = override_get_db_session
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
