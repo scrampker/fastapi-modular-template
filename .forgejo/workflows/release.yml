@@ -15,11 +15,12 @@ permissions:
 
 env:
   FORGEJO_BASE: https://forgejo.scotty.consulting
-  # Phase 2 pilot: narrowed to scottystrike only.
-  # Expand to all 5 apps (scottyscribe scottyscan scottomation scottysync)
-  # during Phase 3 as each gets its own scottycore-upgrade.yml workflow.
+  # Apps that have .forgejo/workflows/scottycore-upgrade.yml wired.
+  # scottyscribe + scottyscan deferred — non-root-pyproject layouts need
+  # per-app adaptation. scottysync deferred — no remote configured yet.
   APPS: >-
     scottystrike
+    scottomation
 
 jobs:
   release:
