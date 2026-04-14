@@ -134,3 +134,4 @@ desktop.ini
 # =============================================================================
 .docker/
 docker-compose.override.yml
+.claude/scheduled_tasks.lock
