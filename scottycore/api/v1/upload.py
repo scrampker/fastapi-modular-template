@@ -13,6 +13,8 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+
+from scottycore.services.files.service import _secure_filename
 from pydantic import BaseModel
 
 from scottycore.core.auth import require_role
@@ -70,8 +72,7 @@ async def upload_files(
 
     for upload in files:
         original_name = upload.filename or "file"
-        # Sanitize: strip path separators an attacker might inject
-        safe_name = Path(original_name).name or "file"
+        safe_name = _secure_filename(original_name) or "file"
         saved_name = f"{uuid.uuid4().hex}_{safe_name}"
         dest = upload_dir / saved_name
 
