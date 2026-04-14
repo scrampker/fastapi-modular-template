@@ -19,8 +19,10 @@
 #           -v /root/.config/scottycore-hubitat.json:/root/.config/scottycore-hubitat.json:ro
 #
 # Auth model:
-#   - Claude Code: ANTHROPIC_API_KEY env (Forgejo Actions secret). No interactive OAuth.
-#   - Forgejo API: GITHUB_TOKEN equivalent auto-injected by runner, or a PAT secret.
+#   - Claude Code: bind-mount host /root/.claude into the container (rw).
+#     Uses the host's existing Max subscription. No ANTHROPIC_API_KEY, no
+#     separate billing. Re-auth on the host when the session expires.
+#   - Forgejo API: FORGEJO_TOKEN secret per repo.
 #   - Hubitat: config mounted read-only from host (lifted out of sync-watcher.py).
 
 FROM debian:bookworm-slim

@@ -21,7 +21,9 @@ The runner container relies on two bind mounts from CT118:
 | Host path | Mount | Purpose |
 |-----------|-------|---------|
 | `/root/.config/scottycore-hubitat.json` | read-only | Hubitat alert config (lifted from `sync-watcher.py`) |
-| (optional) `/root/.claude` | read-only | Claude Code auth — only if using OAuth login instead of API key |
+| `/root/.claude` | read-write | Claude Code OAuth session — `claude -p` uses the host's Max subscription, no API billing. rw so refreshed tokens persist. |
+
+Initialize `/root/.claude` on CT118 by running `claude` interactively once on the host and completing the normal OAuth flow. Re-run whenever the session expires (~30 days).
 
 ## Secrets (Forgejo Actions)
 
@@ -29,9 +31,9 @@ Set on each repo at `…/settings/actions/secrets`:
 
 | Secret | Purpose |
 |--------|---------|
-| `ANTHROPIC_API_KEY` | Claude Code CLI auth (preferred over OAuth for CI — no interactive login) |
 | `FORGEJO_TOKEN` | PAT with repo write (for opening PRs, merging, posting comments) |
-| `GITHUB_MIRROR_TOKEN` | PAT for mirror push to GitHub (optional; post-push hook alternative) |
+
+No `ANTHROPIC_API_KEY` — Claude Code runs against the bind-mounted host session, which uses your existing Max subscription. Zero per-call billing.
 
 ## Use from a workflow
 
@@ -43,9 +45,9 @@ jobs:
     container:
       image: scottycore-runner:latest
       options: >-
+        -v /root/.claude:/root/.claude
         -v /root/.config/scottycore-hubitat.json:/root/.config/scottycore-hubitat.json:ro
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
