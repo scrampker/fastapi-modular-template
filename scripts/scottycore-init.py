@@ -354,6 +354,47 @@ def inject_claude_section(app_path: Path) -> bool:
 # ── Step 6: Commit + push ───────────────────────────────────────────────────
 
 
+def install_promote_nudge_hook(app_path: Path, app_name: str) -> bool:
+    """Install the pre-commit /promote nudge hook into the app's .git/hooks.
+
+    The hook runs `claude -p` on staged diffs and suggests /promote
+    invocations when code looks extractable. Never blocks commits.
+    Idempotent — overwrites an existing hook if we previously installed one.
+    """
+    src = CORE_DIR / ".claude" / "hooks" / "pre-commit-promote-nudge.sh"
+    hooks_dir = app_path / ".git" / "hooks"
+    dest = hooks_dir / "pre-commit"
+
+    if not src.exists():
+        print(f"  hook source missing at {src}")
+        return False
+    if not hooks_dir.exists():
+        print(f"  {hooks_dir} does not exist — skipping hook install")
+        return False
+
+    # If an existing hook is present and wasn't installed by us, back it up
+    marker = "pre-commit-promote-nudge"
+    if dest.exists():
+        existing = dest.read_text(errors="replace")
+        if marker not in existing:
+            backup = hooks_dir / "pre-commit.pre-scottycore.bak"
+            dest.rename(backup)
+            print(f"  existing pre-commit hook backed up to {backup.name}")
+
+    # Write a wrapper that calls our hook and preserves the user's ability
+    # to add more logic later (symlink would be brittle if the user edits it).
+    wrapper = f"""#!/usr/bin/env bash
+# pre-commit (installed by scottycore-init.py — {marker})
+# Calls the shared nudge hook from scottycore. Never blocks the commit.
+{src}
+exit 0
+"""
+    dest.write_text(wrapper)
+    dest.chmod(0o755)
+    print(f"  installed pre-commit /promote nudge hook in {app_name}")
+    return True
+
+
 def commit_app_changes(app_path: Path, app_name: str) -> bool:
     """Commit the generated files in the app repo."""
     def git(*args: str) -> subprocess.CompletedProcess:
@@ -697,14 +738,18 @@ def main():
     print(f"\nStep 5: Inject ScottyCore section into CLAUDE.md")
     inject_claude_section(app_path)
 
-    # Step 6: Commit + push app changes
-    print(f"\nStep 6: Commit and push app changes")
+    # Step 6: Install /promote nudge hook
+    print(f"\nStep 6: Install pre-commit /promote nudge hook")
+    install_promote_nudge_hook(app_path, app_name)
+
+    # Step 7: Commit + push app changes
+    print(f"\nStep 7: Commit and push app changes")
     committed = commit_app_changes(app_path, app_name)
     if committed:
         push_app(app_path, branch)
 
-    # Step 7: Commit + push scottycore changes
-    print(f"\nStep 7: Commit and push scottycore changes")
+    # Step 8: Commit + push scottycore changes
+    print(f"\nStep 8: Commit and push scottycore changes")
     commit_scottycore_changes(app_name)
 
     # Step 8: Validation
