@@ -15,12 +15,11 @@ permissions:
 
 env:
   FORGEJO_BASE: https://forgejo.scotty.consulting
+  # Phase 2 pilot: narrowed to scottystrike only.
+  # Expand to all 5 apps (scottyscribe scottyscan scottomation scottysync)
+  # during Phase 3 as each gets its own scottycore-upgrade.yml workflow.
   APPS: >-
     scottystrike
-    scottyscribe
-    scottyscan
-    scottomation
-    scottysync
 
 jobs:
   release:
