@@ -21,9 +21,10 @@ The runner container relies on two bind mounts from CT118:
 | Host path | Mount | Purpose |
 |-----------|-------|---------|
 | `/root/.config/scottycore-hubitat.json` | read-only | Hubitat alert config (lifted from `sync-watcher.py`) |
-| `/root/.claude` | read-write | Claude Code OAuth session — `claude -p` uses the host's Max subscription, no API billing. rw so refreshed tokens persist. |
+| `/root/.claude` | read-write | Claude Code sessions + credentials dir. rw so refreshed tokens persist. |
+| `/root/.claude.json` | read-write | Claude Code global config (separate file — easy to miss). |
 
-Initialize `/root/.claude` on CT118 by running `claude` interactively once on the host and completing the normal OAuth flow. Re-run whenever the session expires (~30 days).
+Initialize both by running `claude` interactively once on the host and completing the normal OAuth flow. Re-run whenever the session expires (~30 days).
 
 ## Secrets (Forgejo Actions)
 
