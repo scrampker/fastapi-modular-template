@@ -27,7 +27,7 @@ Usage:
 # ---------------------------------------------------------------------------
 
 APP_NAME = "MyApp"
-ENTRY_POINT = "app.main:app"    # uvicorn module:variable  (e.g. "app.main:app")
+ENTRY_POINT = "scottycore.main:app"    # uvicorn module:variable  (e.g. "scottycore.main:app")
 MIN_PYTHON = (3, 10)            # (major, minor) minimum Python version
 DEFAULT_PORT = 8000             # Port used when --port is not supplied
 RESTART_EXIT_CODE = 75          # Server signals "please restart" with this code
@@ -566,7 +566,7 @@ def start_cli(args: list[str]) -> None:
     project uses a different CLI entry point.
     """
     # Derive a reasonable module path from ENTRY_POINT.
-    # e.g. "app.main:app" → try "app.cli.main:app" first, fall back to ENTRY_POINT.
+    # e.g. "scottycore.main:app" → try "app.cli.main:app" first, fall back to ENTRY_POINT.
     module_path, _, attr = ENTRY_POINT.partition(":")
     parts = module_path.split(".")
 

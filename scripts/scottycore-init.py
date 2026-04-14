@@ -24,7 +24,12 @@ Usage:
     python3 scripts/scottycore-init.py /path/to/app --stack "Flask" # set stack description
     python3 scripts/scottycore-init.py /path/to/app --skip-forgejo # skip Forgejo repo creation
     python3 scripts/scottycore-init.py /path/to/app --github-repo scrampker/MyApp  # explicit GitHub repo
+    python3 scripts/scottycore-init.py /path/to/new-app --scaffold   # scaffold a new app dir from scottycore
     python3 scripts/scottycore-init.py --list                       # list registered apps
+
+If the target path does not exist, pass --scaffold (or answer 'y' at the
+prompt) to create it by cloning scottycore as a template, stripping the
+git history, and initializing a fresh repo with a first commit.
 """
 
 from __future__ import annotations
@@ -425,6 +430,68 @@ def commit_scottycore_changes(app_name: str) -> bool:
         return False
 
 
+# ── Scaffold new app from scottycore template ───────────────────────────────
+
+
+def scaffold_new_app(app_path: Path, app_name: str) -> bool:
+    """Create a new app directory by cloning scottycore as a template.
+
+    Mirrors the manual steps from scottycore/CLAUDE.md:
+      1. Copy scottycore tree (minus .git, venv, caches, data, db files)
+      2. Rename pyproject.toml project name to app_name
+      3. `git init` + initial commit
+    """
+    import shutil
+
+    if app_path.exists():
+        print(f"  {app_path} already exists — skipping scaffold")
+        return False
+
+    app_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ignore_names = {
+        ".git", ".venv", "venv", "__pycache__", ".pytest_cache",
+        ".mypy_cache", ".ruff_cache", "node_modules", "data",
+        "app.db", "app.db-journal", ".env",
+    }
+
+    def _ignore(_dir, names):
+        return [n for n in names if n in ignore_names or n.endswith(".pyc")]
+
+    print(f"  Copying scottycore template to {app_path}")
+    shutil.copytree(CORE_DIR, app_path, ignore=_ignore)
+
+    # Update pyproject.toml project name if present
+    pyproject = app_path / "pyproject.toml"
+    if pyproject.exists():
+        text = pyproject.read_text()
+        updated = re.sub(
+            r'(?m)^name\s*=\s*"[^"]+"',
+            f'name = "{app_name}"',
+            text,
+            count=1,
+        )
+        if updated != text:
+            pyproject.write_text(updated)
+            print(f"  Set pyproject.toml name = \"{app_name}\"")
+
+    # Fresh git repo
+    subprocess.run(["git", "-C", str(app_path), "init", "-b", "master"],
+                   capture_output=True, text=True, timeout=15)
+    subprocess.run(["git", "-C", str(app_path), "add", "-A"],
+                   capture_output=True, text=True, timeout=30)
+    r = subprocess.run(
+        ["git", "-C", str(app_path), "commit", "-m",
+         f"chore: scaffold {app_name} from scottycore template"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode == 0:
+        print(f"  Initialized git repo with scaffold commit")
+    else:
+        print(f"  git init/commit warning: {r.stderr.strip()[:200]}")
+    return True
+
+
 # ── Interactive pattern selection ────────────────────────────────────────────
 
 
@@ -524,9 +591,6 @@ def main():
         return
 
     app_path = Path(args[0]).resolve()
-    if not app_path.exists():
-        print(f"Error: path does not exist: {app_path}")
-        sys.exit(1)
 
     # Parse flags
     app_name = None
@@ -535,6 +599,7 @@ def main():
     adopt_all = "--adopt-all" in args
     adopt_none = "--adopt-none" in args
     skip_forgejo = "--skip-forgejo" in args
+    scaffold_flag = "--scaffold" in args
 
     for i, arg in enumerate(args):
         if arg == "--name" and i + 1 < len(args):
@@ -546,6 +611,29 @@ def main():
 
     if app_name is None:
         app_name = app_path.name.lower().replace(" ", "-")
+
+    # Scaffold the app directory if it doesn't exist yet
+    if not app_path.exists():
+        if scaffold_flag:
+            do_scaffold = True
+        elif sys.stdin.isatty():
+            ans = input(
+                f"Path does not exist: {app_path}\n"
+                f"Scaffold a new app from scottycore template? [Y/n]: "
+            ).strip().lower()
+            do_scaffold = ans in ("", "y", "yes")
+        else:
+            print(f"Error: path does not exist: {app_path} "
+                  f"(pass --scaffold to create it)")
+            sys.exit(1)
+
+        if not do_scaffold:
+            print("Aborted — no changes made.")
+            sys.exit(1)
+
+        print(f"\nStep 0: Scaffolding new app at {app_path}")
+        scaffold_new_app(app_path, app_name)
+
     if stack is None:
         stack = detect_stack(app_path)
 

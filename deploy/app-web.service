@@ -15,7 +15,7 @@ EnvironmentFile=/opt/myapp/.env
 
 # Activate the virtual environment and start Gunicorn with Uvicorn workers.
 # Adjust --workers to (2 * CPU cores) + 1 for production.
-ExecStart=/opt/myapp/venv/bin/gunicorn app.main:app \
+ExecStart=/opt/myapp/venv/bin/gunicorn scottycore.main:app \
     --worker-class uvicorn.workers.UvicornWorker \
     --workers 4 \
     --bind 127.0.0.1:8000 \

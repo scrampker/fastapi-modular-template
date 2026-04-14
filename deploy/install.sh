@@ -194,8 +194,8 @@ done
 
 sudo -u "$APP_USER" "$APP_DIR/venv/bin/python" -c "
 import asyncio
-from app.core.database import get_db_context
-from app.services.users.service import create_admin_user
+from scottycore.core.database import get_db_context
+from scottycore.services.users.service import create_admin_user
 
 async def main():
     async with get_db_context() as db:

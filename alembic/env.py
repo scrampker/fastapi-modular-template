@@ -13,12 +13,12 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # Pull in all model metadata so Alembic can autogenerate migrations.
 # Import every module that declares SQLAlchemy models here.
 # ---------------------------------------------------------------------------
-from app.core.database import Base  # noqa: F401 — registers Base.metadata
+from scottycore.core.database import Base  # noqa: F401 — registers Base.metadata
 
 # Service model imports — add one line per service module:
-# from app.services.users.models import *        # noqa: F401, F403
-# from app.services.tenants.models import *      # noqa: F401, F403
-# from app.services.items.models import *        # noqa: F401, F403
+# from scottycore.services.users.models import *        # noqa: F401, F403
+# from scottycore.services.tenants.models import *      # noqa: F401, F403
+# from scottycore.services.items.models import *        # noqa: F401, F403
 
 # ---------------------------------------------------------------------------
 # Alembic Config object — gives access to values in alembic.ini
