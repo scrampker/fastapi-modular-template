@@ -1,4 +1,3 @@
-# scottycore-pattern: ai_backends.multi_provider
 """AI Backends — multi-provider AI connectivity with automatic fallback."""
 
 from scottycore.services.ai_backends.schemas import (

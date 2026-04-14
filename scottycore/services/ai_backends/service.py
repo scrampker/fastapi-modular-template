@@ -1,4 +1,3 @@
-# scottycore-pattern: ai_backends.multi_provider
 """AI Backends service — provider resolution, health checks, and endpoint management.
 
 Extracted from ScottyScribe's battle-tested multi-backend AI system.

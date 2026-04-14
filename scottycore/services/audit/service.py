@@ -1,6 +1,4 @@
 """Audit service — public interface for audit logging."""
-# scottycore-pattern: audit.immutable_log
-# scottycore-pattern: audit.phi_data_access
 
 from __future__ import annotations
 

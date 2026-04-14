@@ -1,4 +1,3 @@
-# scottycore-pattern: ai_backends.multi_provider
 """AI Backends API — health checks, provider resolution, and configuration.
 
 All AI backend settings are managed through the global settings store.

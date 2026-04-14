@@ -1,6 +1,4 @@
 """Settings service — public interface for multi-tier KV settings."""
-# scottycore-pattern: settings.kv_hierarchy
-# scottycore-pattern: settings.layout_passthrough
 
 from __future__ import annotations
 

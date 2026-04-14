@@ -1,4 +1,3 @@
-# scottycore-pattern: ai_backends.multi_provider
 """AI Backends service contract — schemas only.
 
 Defines the configuration and status schemas for multi-provider AI
