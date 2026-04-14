@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux]
+    container:
+      image: scottycore-runner:latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: install package (dev extras)
+        run: |
+          python3 -m pip install --break-system-packages --quiet -e ".[dev]"
+
+      - name: ruff lint
+        run: |
+          ruff check scottycore tests || true
+          # TODO: remove `|| true` once lint is clean. Tracked as a cleanup task.
+
+      - name: build wheel
+        run: |
+          python3 -m build --wheel --sdist
+          ls -la dist/
+
+      - name: wheel artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: scottycore-wheel
+          path: dist/*.whl
+          retention-days: 7

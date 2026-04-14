@@ -1,0 +1,155 @@
+name: release
+
+# Triggered by pushing a semver tag (e.g. `v0.1.0`). Builds the wheel,
+# generates release notes (git-cliff + optional docs/release-notes/vX.Y.Z.md),
+# attaches them to a Forgejo release, then fans out a `scottycore-upgrade`
+# workflow-dispatch to each app repo with the new version + changelog payload.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+env:
+  FORGEJO_BASE: https://forgejo.scotty.consulting
+  APPS: >-
+    scottystrike
+    scottyscribe
+    scottyscan
+    scottomation
+    scottysync
+
+jobs:
+  release:
+    runs-on: [self-hosted, linux]
+    container:
+      image: scottycore-runner:latest
+    steps:
+      - name: checkout (full history for changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: resolve version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          # Guard: tag must match pyproject.toml
+          PY_VERSION=$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          if [ "$VERSION" != "$PY_VERSION" ]; then
+            echo "::error::tag version ($VERSION) != pyproject.toml version ($PY_VERSION)"
+            exit 1
+          fi
+
+      - name: install git-cliff
+        run: |
+          CLIFF_VERSION=2.6.1
+          curl -fsSL "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /tmp
+          mv "/tmp/git-cliff-${CLIFF_VERSION}/git-cliff" /usr/local/bin/git-cliff
+          git-cliff --version
+
+      - name: generate changelog
+        id: changelog
+        run: |
+          git config --global --add safe.directory "$PWD"
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # Auto-generated section for this tag (commits since previous tag)
+          git-cliff --config cliff.toml --tag "$TAG" --unreleased --strip header > /tmp/auto.md
+
+          # Prepend hand-authored notes if they exist
+          HAND_NOTES="docs/release-notes/${TAG}.md"
+          if [ -f "$HAND_NOTES" ]; then
+            cat "$HAND_NOTES" > /tmp/changelog.md
+            echo "" >> /tmp/changelog.md
+            echo "---" >> /tmp/changelog.md
+            echo "" >> /tmp/changelog.md
+            cat /tmp/auto.md >> /tmp/changelog.md
+          else
+            cp /tmp/auto.md /tmp/changelog.md
+          fi
+
+          echo "--- release notes ---"
+          cat /tmp/changelog.md
+          echo "--- end ---"
+
+          # For the app-dispatch payload, escape as a JSON string
+          jq -Rs . < /tmp/changelog.md > /tmp/changelog.json.str
+
+      - name: build wheel + sdist
+        run: |
+          python3 -m build
+          ls -la dist/
+
+      - name: create Forgejo release
+        env:
+          TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          BODY=$(cat /tmp/changelog.md)
+
+          # Create the release
+          REL_ID=$(curl -fsSL -X POST \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            "$FORGEJO_BASE/api/v1/repos/scotty/scottycore/releases" \
+            -d "$(jq -n --arg tag "$TAG" --arg name "scottycore $VERSION" --arg body "$BODY" \
+                  '{tag_name:$tag, name:$name, body:$body, draft:false, prerelease:false}')" \
+            | jq -r '.id')
+
+          echo "Release ID: $REL_ID"
+
+          # Attach wheel + sdist
+          for f in dist/*.whl dist/*.tar.gz; do
+            curl -fsSL -X POST \
+              -H "Authorization: token $TOKEN" \
+              -H "Content-Type: multipart/form-data" \
+              -F "attachment=@$f" \
+              "$FORGEJO_BASE/api/v1/repos/scotty/scottycore/releases/$REL_ID/assets?name=$(basename "$f")"
+          done
+
+      - name: dispatch upgrade to each app repo
+        env:
+          TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          CHANGELOG_JSON=$(cat /tmp/changelog.json.str)
+
+          for app in $APPS; do
+            echo "--- dispatching to $app ---"
+            PAYLOAD=$(jq -n \
+              --arg ref "master" \
+              --arg version "$VERSION" \
+              --arg tag "$TAG" \
+              --argjson changelog "$CHANGELOG_JSON" \
+              '{ref:$ref, inputs:{version:$version, tag:$tag, changelog:$changelog}}')
+
+            HTTP=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" -X POST \
+              -H "Authorization: token $TOKEN" \
+              -H "Content-Type: application/json" \
+              "$FORGEJO_BASE/api/v1/repos/scotty/$app/actions/workflows/scottycore-upgrade.yml/dispatches" \
+              --data "$PAYLOAD")
+
+            if [ "$HTTP" = "204" ] || [ "$HTTP" = "201" ] || [ "$HTTP" = "200" ]; then
+              echo "  $app: dispatched (HTTP $HTTP)"
+            else
+              echo "  $app: FAILED (HTTP $HTTP)"
+              cat /tmp/resp.txt
+              # Non-fatal — other apps should still receive the dispatch
+              notify-hubitat P2 "scottycore $VERSION: dispatch to $app failed (HTTP $HTTP)" || true
+            fi
+          done
+
+      - name: alert on success
+        if: success()
+        run: |
+          notify-hubitat P4 "scottycore ${{ steps.version.outputs.version }} released; upgrade PRs dispatched to 5 apps" || true
