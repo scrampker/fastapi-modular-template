@@ -73,6 +73,95 @@ NGINX_HOST = "192.168.151.10"  # cloudflared + nginx reverse proxy
 # Readable only by SSH'ing to the nginx host (root).
 CF_TOKEN_REMOTE_PATH = "/etc/letsencrypt/cloudflare.ini"
 
+# Proxmox provisioning defaults. Override via flags when adopting a different
+# template, storage pool, or target node.
+PROXMOX_NODE_IP = "192.168.150.101"   # proxmox1.melbourne
+PROXMOX_NODE_NAME = "proxmox1"
+PCT_TEMPLATE = "local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+PCT_STORAGE = "rbd_nvme_storage"
+PCT_DISK_GB = 16
+PCT_CORES = 2
+PCT_MEMORY_MB = 2048
+PCT_BRIDGE = "vmbr0"
+PCT_VLAN = 150
+
+
+def _ssh_run(host: str, cmd: str, timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, cmd],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def provision_lxc(app_name: str) -> tuple[int, str] | None:
+    """Create an unprivileged Docker-capable LXC on proxmox1 and wait for
+    an IPv4 address. Returns (vmid, ip) on success, None on failure.
+
+    Idempotent: if a CT with `hostname == app_name` already exists on the
+    node, returns that CT's (vmid, ip) without recreating it.
+    """
+    # Check for existing CT with this hostname. `pct list` has columns
+    # VMID STATUS LOCK NAME — the NAME column is the hostname.
+    find = _ssh_run(
+        PROXMOX_NODE_IP,
+        f"pct list | awk -v h={app_name} '$NF==h {{print $1}}'",
+    )
+    existing_vmid = find.stdout.strip().splitlines()[0] if find.stdout.strip() else ""
+    if existing_vmid.isdigit():
+        ip_r = _ssh_run(
+            PROXMOX_NODE_IP,
+            f"pct exec {existing_vmid} -- ip -4 -o addr show eth0 2>/dev/null "
+            f"| awk '{{print $4}}' | cut -d/ -f1 | head -1",
+        )
+        ip = ip_r.stdout.strip()
+        print(f"  LXC for {app_name} already exists (CT {existing_vmid}, IP {ip})")
+        return (int(existing_vmid), ip)
+
+    create_cmd = (
+        f"set -e; "
+        f"VMID=$(pvesh get /cluster/nextid); "
+        f"pct create $VMID {PCT_TEMPLATE} "
+        f"  --hostname {app_name} "
+        f"  --unprivileged 1 --features nesting=1,keyctl=1 "
+        f"  --cores {PCT_CORES} --memory {PCT_MEMORY_MB} --swap 512 "
+        f"  --rootfs {PCT_STORAGE}:{PCT_DISK_GB} "
+        f"  --net0 name=eth0,bridge={PCT_BRIDGE},ip=dhcp,tag={PCT_VLAN} "
+        f"  --onboot 1 "
+        f"  --ssh-public-keys /root/.ssh/authorized_keys "
+        f"  --start 1 >/dev/null; "
+        f"echo VMID=$VMID"
+    )
+    r = _ssh_run(PROXMOX_NODE_IP, create_cmd, timeout=180)
+    if r.returncode != 0:
+        print(f"  pct create failed: {r.stderr.strip()[:300]}")
+        return None
+
+    vmid_line = next((ln for ln in r.stdout.splitlines() if ln.startswith("VMID=")), "")
+    if not vmid_line:
+        print(f"  pct create: could not parse VMID from output")
+        return None
+    vmid = int(vmid_line.split("=", 1)[1])
+
+    # Poll for IP — DHCP usually settles within 10s
+    import time
+    ip = ""
+    for _ in range(30):
+        time.sleep(1)
+        ip_r = _ssh_run(
+            PROXMOX_NODE_IP,
+            f"pct exec {vmid} -- ip -4 -o addr show eth0 2>/dev/null "
+            f"| awk '{{print $4}}' | cut -d/ -f1 | head -1",
+        )
+        ip = ip_r.stdout.strip()
+        if ip and ip != "":
+            break
+    if not ip:
+        print(f"  CT {vmid} created but DHCP IP not seen after 30s")
+        return None
+
+    print(f"  Provisioned LXC: CT {vmid}, IP {ip}")
+    return (vmid, ip)
+
 
 def _ssh_read(host: str, path: str) -> str | None:
     r = subprocess.run(
@@ -545,7 +634,7 @@ def add_nginx_cert_apex(apex: str) -> bool:
 
 
 def add_nginx_vhost(app_name: str, fqdn: str, apex: str,
-                    upstream_host: str, port: int) -> bool:
+                    upstream_host_or_ip: str, port: int) -> bool:
     """Append a vhost entry to nginx-vhosts.yml."""
     if not _scottylab_available():
         return False
@@ -564,10 +653,10 @@ def add_nginx_vhost(app_name: str, fqdn: str, apex: str,
         f"      - name: {app_name}",
         f"        server_name: {fqdn}",
         f"        cert: {apex}",
-        f"        upstream: http://{upstream_host}:{port}",
+        f"        upstream: http://{upstream_host_or_ip}:{port}",
     ]
     if _append_to_yaml_list(vhosts_yml, "nginx_vhosts", entry_lines):
-        print(f"  Added vhost '{app_name}' -> {fqdn} -> http://{upstream_host}:{port}")
+        print(f"  Added vhost '{app_name}' -> {fqdn} -> http://{upstream_host_or_ip}:{port}")
         return True
     print(f"  Could not locate nginx_vhosts: block")
     return False
@@ -600,6 +689,126 @@ def add_scottycore_app(app_name: str, target_host: str, port: int,
         return False
     print(f"  Added scottycore-apps entry '{app_name}' -> {target_host}")
     return True
+
+
+def register_in_inventory(app_name: str, target_host: str, ip: str,
+                          vmid: int, note: str) -> bool:
+    """Append <target_host> entry under docker_melbourne in workloads.yml."""
+    if not _scottylab_available():
+        return False
+    inv = SCOTTYLAB_DIR / "automation/ansible/inventory/workloads.yml"
+    if not inv.exists():
+        print(f"  inventory/workloads.yml not found")
+        return False
+
+    text = inv.read_text()
+    if re.search(rf"^\s*{re.escape(target_host)}:\s*$", text, re.M):
+        print(f"  {target_host} already in inventory")
+        return False
+
+    # Find docker_melbourne: and its hosts: block, append a new host there.
+    m = re.search(r"(^\s*docker_melbourne:\s*\n\s*hosts:\s*\n)", text, re.M)
+    if not m:
+        print(f"  Could not locate docker_melbourne.hosts in inventory")
+        return False
+
+    lines = text.splitlines(keepends=True)
+    # Index of the line right after `hosts:` under docker_melbourne
+    start = text[: m.end(1)].count("\n")
+    # Determine the indent used for existing hosts (first non-blank line after)
+    host_indent = "            "
+    for i in range(start, len(lines)):
+        ln = lines[i]
+        if ln.strip() == "":
+            continue
+        leading = len(ln) - len(ln.lstrip(" "))
+        # existing hosts sit at a deeper indent than `hosts:`
+        if leading > 0:
+            host_indent = " " * leading
+        break
+
+    # Walk forward to the end of docker_melbourne.hosts block (first dedent)
+    insert_at = len(lines)
+    host_indent_len = len(host_indent)
+    for i in range(start, len(lines)):
+        ln = lines[i]
+        if ln.strip() == "":
+            continue
+        leading = len(ln) - len(ln.lstrip(" "))
+        if leading < host_indent_len:
+            insert_at = i
+            break
+    while insert_at > start and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+
+    child = host_indent + "  "
+    entry = (
+        f"{host_indent}{target_host}:\n"
+        f"{child}ansible_host: {ip}\n"
+        f"{child}proxmox_host: {PROXMOX_NODE_NAME}\n"
+        f"{child}vmid: {vmid}\n"
+        f"{child}note: \"{note}\"\n"
+    )
+    lines.insert(insert_at, entry)
+    inv.write_text("".join(lines))
+    print(f"  Registered {target_host} -> {ip} in inventory")
+    return True
+
+
+# ── Ansible runners (end-to-end: install docker, deploy, publish) ───────────
+
+
+ANSIBLE_DIR = SCOTTYLAB_DIR / "automation/ansible"
+
+
+def _ansible_run(playbook: str, *, limit: str | None = None,
+                 extra_vars: dict | None = None) -> bool:
+    cmd = [
+        "ansible-playbook",
+        "-i", "inventory/hosts.yml",
+        "-i", "inventory/workloads.yml",
+        f"playbooks/workloads/{playbook}",
+    ]
+    if limit:
+        cmd += ["-l", limit]
+    if extra_vars:
+        for k, v in extra_vars.items():
+            cmd += ["-e", f"{k}={v}"]
+    r = subprocess.run(cmd, cwd=str(ANSIBLE_DIR),
+                       capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        tail = (r.stdout + r.stderr).splitlines()[-20:]
+        print(f"  ansible {playbook} FAILED:")
+        for ln in tail:
+            print(f"    {ln}")
+        return False
+    # Parse recap line for brevity
+    recap = [ln for ln in r.stdout.splitlines()
+             if re.search(r"\s:\s+ok=\d+", ln)]
+    for ln in recap:
+        print(f"  {ln.strip()}")
+    return True
+
+
+def install_docker_on(host: str) -> bool:
+    print(f"  installing Docker on {host}...")
+    return _ansible_run("docker.yml", limit=host, extra_vars={"target_hosts": "all"})
+
+
+def issue_certs() -> bool:
+    print(f"  issuing/expanding Let's Encrypt certs...")
+    return _ansible_run("nginx-certs.yml")
+
+
+def deploy_scottycore_app(host: str) -> bool:
+    print(f"  deploying scottycore app on {host}...")
+    return _ansible_run("scottycore-apps.yml", limit=host,
+                        extra_vars={"target_hosts": "all"})
+
+
+def publish_vhost() -> bool:
+    print(f"  publishing nginx vhost...")
+    return _ansible_run("nginx-vhosts.yml")
 
 
 def commit_scottylab_changes(app_name: str) -> bool:
@@ -1232,11 +1441,22 @@ def main():
     else:
         print(f"  --skip-forgejo: skipping Forgejo repo creation")
 
-    # Port assignment + FQDN
+    # Port assignment + FQDN. Reuse existing port on re-runs so idempotency
+    # doesn't shift ports out from under the deployed container.
     existing_apps = load_apps_config()
-    port = port_override if port_override is not None else pick_next_port(existing_apps)
-    apex = DEFAULT_DOMAIN_APEX if not domain else domain.split(".", 1)[1] if "." in domain else domain
-    fqdn = domain if domain else f"{app_name}.{DEFAULT_DOMAIN_APEX}"
+    if port_override is not None:
+        port = port_override
+    elif app_name in existing_apps and "port" in existing_apps[app_name]:
+        port = int(existing_apps[app_name]["port"])
+    else:
+        port = pick_next_port(existing_apps)
+    if domain:
+        fqdn = domain
+    elif app_name in existing_apps and "fqdn" in existing_apps[app_name]:
+        fqdn = existing_apps[app_name]["fqdn"]
+    else:
+        fqdn = f"{app_name}.{DEFAULT_DOMAIN_APEX}"
+    apex = fqdn.split(".", 1)[1] if "." in fqdn else fqdn
 
     # Step 2: Register
     print(f"\nStep 2: Register in config/apps.yaml")
@@ -1271,21 +1491,35 @@ def main():
         print(f"\nStep 5d: Add {app_name} to scottycore release.yml APPS")
         add_to_release_apps(app_name)
 
-    # Step 5e: Declare infra in scottylab (cert apex, nginx vhost, scottycore-apps)
+    # Step 5e: Provision LXC on proxmox1 (idempotent — reuses if hostname matches)
+    lxc_ip = None
+    lxc_vmid = None
     if not skip_infra:
-        print(f"\nStep 5e: Declare infra in scottylab")
+        print(f"\nStep 5e: Provision LXC on {PROXMOX_NODE_NAME}")
+        prov = provision_lxc(app_name)
+        if prov:
+            lxc_vmid, lxc_ip = prov
+
+    # Step 5f: Declare infra in scottylab (cert apex, nginx vhost, scottycore-apps, inventory)
+    if not skip_infra:
+        print(f"\nStep 5f: Declare infra in scottylab")
         target_host = f"{app_name}.melbourne"
         repo_url = f"{FORGEJO_BASE}/{FORGEJO_USER}/{app_name}.git"
+        upstream = lxc_ip or target_host  # real IP if we have it; else placeholder
         add_nginx_cert_apex(apex)
-        add_nginx_vhost(app_name, fqdn, apex, target_host, port)
+        add_nginx_vhost(app_name, fqdn, apex, upstream, port)
         add_scottycore_app(app_name, target_host, port, repo_url, branch)
+        if lxc_ip and lxc_vmid is not None:
+            register_in_inventory(app_name, target_host, lxc_ip, lxc_vmid,
+                                  note=f"scottycore app — {stack}")
         commit_scottylab_changes(app_name)
 
-    # Step 5f: Publish via Cloudflare (DNS CNAME + tunnel ingress)
+    # Step 5g: Publish via Cloudflare (DNS CNAME + tunnel ingress)
     if not skip_infra:
-        print(f"\nStep 5f: Publish {fqdn} via Cloudflare tunnel")
+        print(f"\nStep 5g: Publish {fqdn} via Cloudflare tunnel")
         ensure_cf_cname(fqdn, apex)
         ensure_tunnel_ingress(fqdn)
+
 
     # Step 6: Commit + push app changes
     print(f"\nStep 6: Commit and push app changes")
@@ -1298,6 +1532,15 @@ def main():
     # Step 7: Commit + push scottycore changes
     print(f"\nStep 7: Commit and push scottycore changes")
     commit_scottycore_changes(app_name)
+
+    # Step 8: Run ansible — install Docker on new LXC, issue cert, deploy, publish vhost
+    if not skip_infra and lxc_ip:
+        print(f"\nStep 8: Run ansible end-to-end")
+        target_host = f"{app_name}.melbourne"
+        install_docker_on(target_host)
+        issue_certs()
+        deploy_scottycore_app(target_host)
+        publish_vhost()
 
     print(f"\n{'='*60}")
     print(f"  Done! '{app_name}' is now part of the ScottyCore ecosystem.")
@@ -1315,26 +1558,16 @@ def main():
     print(f"  - {app_name} added to scottycore release.yml APPS fan-out")
     print(f"  - docker-compose.yml rendered (port {port})")
     if not skip_infra:
-        print(f"  - scottylab: {apex} added to nginx-certs.yml (new apex, if not present)")
-        print(f"  - scottylab: {fqdn} -> http://{app_name}.melbourne:{port} added to nginx-vhosts.yml")
+        if lxc_ip and lxc_vmid is not None:
+            print(f"  - Provisioned LXC CT {lxc_vmid} on {PROXMOX_NODE_NAME} at {lxc_ip}")
+            print(f"  - Registered {app_name}.melbourne in scottylab inventory")
+        print(f"  - scottylab: {apex} added to nginx-certs.yml (if new apex)")
+        print(f"  - scottylab: {fqdn} -> http://{lxc_ip or app_name + '.melbourne'}:{port} in nginx-vhosts.yml")
         print(f"  - scottylab: {app_name} added to scottycore-apps.yml deploy list")
+        print(f"  - Cloudflare: {fqdn} CNAME -> melbourne tunnel + ingress rule")
+        print(f"  - Ansible: docker installed, cert issued, container deployed, vhost published")
     print(f"  - All changes committed and pushed")
-    print(f"\n  To bring it online (run from an ansible-capable host):")
-    print(f"    cd /script/scottylab/automation/ansible")
-    print(f"    # 1) Provision the LXC on proxmox1 (auto-assigns VMID)")
-    print(f"    ssh 192.168.150.101 'pct create $(pvesh get /cluster/nextid) \\")
-    print(f"        local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \\")
-    print(f"        --hostname {app_name}.melbourne --unprivileged 1 --features nesting=1 \\")
-    print(f"        --cores 2 --memory 2048 --rootfs rbd_nvme_storage:16 \\")
-    print(f"        --net0 name=eth0,bridge=vmbr0,ip=dhcp,tag=150 --onboot 1 --start 1'")
-    print(f"    # 2) Install Docker on the new LXC")
-    print(f"    ansible-playbook -i inventory/hosts.yml playbooks/workloads/docker.yml \\")
-    print(f"        -l {app_name}.melbourne")
-    print(f"    # 3) Issue cert (if new apex) + deploy app + publish vhost")
-    print(f"    ansible-playbook -i inventory/hosts.yml playbooks/workloads/nginx-certs.yml")
-    print(f"    ansible-playbook -i inventory/hosts.yml playbooks/workloads/scottycore-apps.yml \\")
-    print(f"        -l {app_name}.melbourne")
-    print(f"    ansible-playbook -i inventory/hosts.yml playbooks/workloads/nginx-vhosts.yml")
+    print(f"\n  Verify:  curl -sSf https://{fqdn}/health")
     print()
 
 
