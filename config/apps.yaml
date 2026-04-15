@@ -55,3 +55,5 @@ scottybiz:
   path: /script/scottybiz
   stack: FastAPI
   branch: master
+  port: 8100
+  fqdn: scottybiz.corpaholics.com
