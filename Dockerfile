@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy dependency specification and install packages into a prefix directory
 # so they can be cleanly copied into the runtime image.
 COPY pyproject.toml ./
-COPY app/ app/
+COPY scottycore/ scottycore/
 RUN pip install --no-cache-dir --prefix=/install .
 
 # ---- Runtime stage ---------------------------------------------------------
@@ -38,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local
 
 # Copy application source
-COPY app/ app/
+COPY scottycore/ scottycore/
 
 # Create a non-root user and hand ownership of the working directory to it
 RUN groupadd --gid 1000 appuser && \
@@ -56,4 +56,4 @@ EXPOSE ${APP_PORT}
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:${APP_PORT}/health || exit 1
 
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "scottycore.main:app", "--host", "0.0.0.0", "--port", "8000"]

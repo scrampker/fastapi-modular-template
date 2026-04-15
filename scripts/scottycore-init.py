@@ -307,6 +307,64 @@ def _scottylab_available() -> bool:
     return True
 
 
+def _append_to_yaml_list(path: Path, list_key: str, entry_lines: list[str]) -> bool:
+    """Append entry_lines to a YAML list named `list_key` in the given file.
+
+    Locates the `<indent><list_key>:` line, then walks forward accepting only
+    lines whose indent > list_key indent (i.e. list body), stopping at the
+    first line that dedents back to <= list_key indent. Inserts the new
+    entry immediately before that exit point.
+
+    entry_lines should be written at the same indent as existing list items
+    (typically list_key_indent + 2). The caller supplies properly indented
+    strings without a trailing newline — this helper joins them.
+    """
+    lines = path.read_text().splitlines(keepends=True)
+    key_idx = None
+    key_indent = 0
+    for i, ln in enumerate(lines):
+        m = re.match(rf"^(\s*){re.escape(list_key)}:\s*$", ln)
+        if m:
+            key_idx = i
+            key_indent = len(m.group(1))
+            break
+    if key_idx is None:
+        # Handle inline empty list form: `<indent><list_key>: []`
+        for i, ln in enumerate(lines):
+            m = re.match(rf"^(\s*){re.escape(list_key)}:\s*\[\]\s*$", ln)
+            if m:
+                indent = m.group(1)
+                replacement = f"{indent}{list_key}:\n"
+                for el in entry_lines:
+                    replacement += el if el.endswith("\n") else el + "\n"
+                lines[i] = replacement
+                path.write_text("".join(lines))
+                return True
+        return False
+
+    # Scan forward through the list body
+    exit_idx = len(lines)
+    for j in range(key_idx + 1, len(lines)):
+        ln = lines[j]
+        if ln.strip() == "":
+            continue
+        leading = len(ln) - len(ln.lstrip(" "))
+        if leading <= key_indent:
+            exit_idx = j
+            break
+
+    # Insert entry just before exit (and before any trailing blank line that
+    # separates the vars block from the next section, to keep formatting).
+    insert_at = exit_idx
+    while insert_at > key_idx + 1 and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+
+    snippet = "".join(el if el.endswith("\n") else el + "\n" for el in entry_lines)
+    lines.insert(insert_at, snippet)
+    path.write_text("".join(lines))
+    return True
+
+
 def add_nginx_cert_apex(apex: str) -> bool:
     """Append a new apex to nginx-certs.yml if not already present.
     Declarative only — no cert is issued until ansible-playbook runs.
@@ -323,21 +381,11 @@ def add_nginx_cert_apex(apex: str) -> bool:
         print(f"  {apex} already in nginx-certs.yml")
         return False
 
-    m = re.search(r"(^\s*nginx_certs:\s*\n)((?:\s*-\s*apex:.*\n(?:\s+.*\n)*)+)",
-                  text, re.M)
-    if not m:
-        print(f"  Could not locate nginx_certs: block")
-        return False
-
-    block = m.group(2)
-    first_line = block.splitlines()[0]
-    indent = first_line[: len(first_line) - len(first_line.lstrip())]
-    new_entry = f"{indent}- apex: {apex}\n"
-    insert_at = m.end(2)
-    text = text[:insert_at] + new_entry + text[insert_at:]
-    certs_yml.write_text(text)
-    print(f"  Added apex '{apex}' to nginx-certs.yml")
-    return True
+    if _append_to_yaml_list(certs_yml, "nginx_certs", [f"      - apex: {apex}"]):
+        print(f"  Added apex '{apex}' to nginx-certs.yml")
+        return True
+    print(f"  Could not locate nginx_certs: block")
+    return False
 
 
 def add_nginx_vhost(app_name: str, fqdn: str, apex: str,
@@ -355,27 +403,18 @@ def add_nginx_vhost(app_name: str, fqdn: str, apex: str,
         print(f"  vhost '{app_name}' already in nginx-vhosts.yml")
         return False
 
-    m = re.search(r"(^\s*nginx_vhosts:\s*\n)((?:\s*-\s*name:.*\n(?:\s+.*\n)*)+)",
-                  text, re.M)
-    if not m:
-        print(f"  Could not locate nginx_vhosts: block")
-        return False
-
-    block = m.group(2)
-    first_line = block.splitlines()[0]
-    indent = first_line[: len(first_line) - len(first_line.lstrip())]
-    child = indent + "  "
-    entry = (
-        f"\n{indent}- name: {app_name}\n"
-        f"{child}server_name: {fqdn}\n"
-        f"{child}cert: {apex}\n"
-        f"{child}upstream: http://{upstream_host}:{port}\n"
-    )
-    insert_at = m.end(2)
-    text = text[:insert_at] + entry + text[insert_at:]
-    vhosts_yml.write_text(text)
-    print(f"  Added vhost '{app_name}' -> {fqdn} -> http://{upstream_host}:{port}")
-    return True
+    entry_lines = [
+        "",
+        f"      - name: {app_name}",
+        f"        server_name: {fqdn}",
+        f"        cert: {apex}",
+        f"        upstream: http://{upstream_host}:{port}",
+    ]
+    if _append_to_yaml_list(vhosts_yml, "nginx_vhosts", entry_lines):
+        print(f"  Added vhost '{app_name}' -> {fqdn} -> http://{upstream_host}:{port}")
+        return True
+    print(f"  Could not locate nginx_vhosts: block")
+    return False
 
 
 def add_scottycore_app(app_name: str, target_host: str, port: int,
@@ -393,43 +432,16 @@ def add_scottycore_app(app_name: str, target_host: str, port: int,
         print(f"  scottycore-apps entry '{app_name}' already present")
         return False
 
-    # Handle first-time case (scottycore_apps: [] with no entries yet)
-    empty = re.search(r"(^(\s*)scottycore_apps:\s*)\[\]\s*$", text, re.M)
-    if empty:
-        indent = empty.group(2) + "  "
-        child = indent + "  "
-        entry = (
-            f"\n{indent}- name: {app_name}\n"
-            f"{child}host: {target_host}\n"
-            f"{child}port: {port}\n"
-            f"{child}repo: {repo_url}\n"
-            f"{child}branch: {branch}"
-        )
-        text = text[:empty.start(0)] + empty.group(1).rstrip() + entry + text[empty.end(0):]
-        apps_yml.write_text(text)
-        print(f"  Added scottycore-apps entry '{app_name}' -> {target_host} (first entry)")
-        return True
-
-    m = re.search(r"(^\s*scottycore_apps:\s*\n)((?:\s*-\s*name:.*\n(?:\s+.*\n)*)+)",
-                  text, re.M)
-    if not m:
+    entry_lines = [
+        f"      - name: {app_name}",
+        f"        host: {target_host}",
+        f"        port: {port}",
+        f"        repo: {repo_url}",
+        f"        branch: {branch}",
+    ]
+    if not _append_to_yaml_list(apps_yml, "scottycore_apps", entry_lines):
         print(f"  Could not locate scottycore_apps: block")
         return False
-
-    block = m.group(2)
-    first_line = block.splitlines()[0]
-    indent = first_line[: len(first_line) - len(first_line.lstrip())]
-    child = indent + "  "
-    entry = (
-        f"\n{indent}- name: {app_name}\n"
-        f"{child}host: {target_host}\n"
-        f"{child}port: {port}\n"
-        f"{child}repo: {repo_url}\n"
-        f"{child}branch: {branch}\n"
-    )
-    insert_at = m.end(2)
-    text = text[:insert_at] + entry + text[insert_at:]
-    apps_yml.write_text(text)
     print(f"  Added scottycore-apps entry '{app_name}' -> {target_host}")
     return True
 
