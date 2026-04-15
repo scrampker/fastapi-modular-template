@@ -21,6 +21,7 @@ env:
   APPS: >-
     scottystrike
     scottomation
+    scottybiz
 
 jobs:
   release:

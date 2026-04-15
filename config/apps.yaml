@@ -50,3 +50,8 @@ scottysync:
   path: /script/scottysync
   stack: FastAPI
   branch: master
+
+scottybiz:
+  path: /script/scottybiz
+  stack: FastAPI
+  branch: master
