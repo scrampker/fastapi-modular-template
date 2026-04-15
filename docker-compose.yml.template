@@ -1,0 +1,30 @@
+# docker-compose.yml — scaffolded by scottycore-init.py
+#
+# Placeholders resolved at scaffold time:
+#   __APP_NAME__  — service + container + volume name
+#   __APP_PORT__  — host-side port (unique per app across the fleet)
+#
+# Container always listens on 8000 internally (matches Dockerfile CMD);
+# the host-side port is mapped so apps can coexist on a single Docker host.
+
+services:
+  __APP_NAME__:
+    build: .
+    image: __APP_NAME__:latest
+    container_name: __APP_NAME__
+    restart: unless-stopped
+    ports:
+      - "__APP_PORT__:8000"
+    env_file:
+      - .env
+    volumes:
+      - __APP_NAME___data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  __APP_NAME___data:

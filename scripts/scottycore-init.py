@@ -55,6 +55,14 @@ FORGEJO_TOKEN_PATH = Path.home() / ".config" / "forgejo-token"
 
 GITHUB_USER = "scrampker"
 
+# Infra/deployment defaults
+SCOTTYLAB_DIR = Path("/script/scottylab")
+SCOTTYLAB_WORKLOADS = SCOTTYLAB_DIR / "automation/ansible/playbooks/workloads"
+PORT_BASE = 8100  # first scottybiz-era port; scan apps.yaml for next free
+
+# Default cert apex for new Scotty apps. Override with --domain <fqdn>.
+DEFAULT_DOMAIN_APEX = "corpaholics.com"
+
 
 # ── Step 1: Forgejo repo + dual-remote ───────────────────────────────────────
 
@@ -229,7 +237,24 @@ def detect_github_remote(app_path: Path) -> str | None:
 # ── Step 2: Register in config/apps.yaml ─────────────────────────────────────
 
 
-def register_app(app_path: Path, app_name: str, stack: str, branch: str) -> bool:
+def pick_next_port(existing: dict) -> int:
+    """Pick the next free port starting from PORT_BASE, skipping any port
+    already recorded on a registered app. Dev apps on 192.168.150.6 and
+    containerized apps share the same port namespace so they stay unique.
+    """
+    used = {
+        int(cfg["port"])
+        for cfg in existing.values()
+        if isinstance(cfg, dict) and str(cfg.get("port", "")).isdigit()
+    }
+    port = PORT_BASE
+    while port in used:
+        port += 1
+    return port
+
+
+def register_app(app_path: Path, app_name: str, stack: str, branch: str,
+                 port: int, fqdn: str) -> bool:
     """Add app to config/apps.yaml. Returns True if added, False if already present."""
     existing = load_apps_config()
     if app_name in existing:
@@ -241,11 +266,204 @@ def register_app(app_path: Path, app_name: str, stack: str, branch: str) -> bool
   path: {app_path}
   stack: {stack}
   branch: {branch}
+  port: {port}
+  fqdn: {fqdn}
 """
     with open(CONFIG_FILE, "a") as f:
         f.write(entry)
 
-    print(f"  Added '{app_name}' to config/apps.yaml")
+    print(f"  Added '{app_name}' to config/apps.yaml (port={port}, fqdn={fqdn})")
+    return True
+
+
+# ── docker-compose.yml in the scaffolded app ────────────────────────────────
+
+
+def install_docker_compose(app_path: Path, app_name: str, port: int) -> bool:
+    """Render docker-compose.yml.template into the new app with the assigned port."""
+    src = CORE_DIR / "docker-compose.yml.template"
+    dest = app_path / "docker-compose.yml"
+    if not src.exists():
+        print(f"  docker-compose template missing at {src}")
+        return False
+    if dest.exists():
+        print(f"  docker-compose.yml already present in {app_name}")
+        return False
+    rendered = (src.read_text()
+                .replace("__APP_NAME__", app_name)
+                .replace("__APP_PORT__", str(port)))
+    dest.write_text(rendered)
+    print(f"  Rendered docker-compose.yml (port {port}) into {app_name}")
+    return True
+
+
+# ── scottylab infra declarations (nginx cert + vhost + scottycore-apps) ─────
+
+
+def _scottylab_available() -> bool:
+    if not SCOTTYLAB_WORKLOADS.exists():
+        print(f"  scottylab not found at {SCOTTYLAB_DIR} — skipping infra edits")
+        return False
+    return True
+
+
+def add_nginx_cert_apex(apex: str) -> bool:
+    """Append a new apex to nginx-certs.yml if not already present.
+    Declarative only — no cert is issued until ansible-playbook runs.
+    """
+    if not _scottylab_available():
+        return False
+    certs_yml = SCOTTYLAB_WORKLOADS / "nginx-certs.yml"
+    if not certs_yml.exists():
+        print(f"  nginx-certs.yml not found")
+        return False
+
+    text = certs_yml.read_text()
+    if re.search(rf"^\s*-\s*apex:\s*{re.escape(apex)}\s*$", text, re.M):
+        print(f"  {apex} already in nginx-certs.yml")
+        return False
+
+    m = re.search(r"(^\s*nginx_certs:\s*\n)((?:\s*-\s*apex:.*\n(?:\s+.*\n)*)+)",
+                  text, re.M)
+    if not m:
+        print(f"  Could not locate nginx_certs: block")
+        return False
+
+    block = m.group(2)
+    first_line = block.splitlines()[0]
+    indent = first_line[: len(first_line) - len(first_line.lstrip())]
+    new_entry = f"{indent}- apex: {apex}\n"
+    insert_at = m.end(2)
+    text = text[:insert_at] + new_entry + text[insert_at:]
+    certs_yml.write_text(text)
+    print(f"  Added apex '{apex}' to nginx-certs.yml")
+    return True
+
+
+def add_nginx_vhost(app_name: str, fqdn: str, apex: str,
+                    upstream_host: str, port: int) -> bool:
+    """Append a vhost entry to nginx-vhosts.yml."""
+    if not _scottylab_available():
+        return False
+    vhosts_yml = SCOTTYLAB_WORKLOADS / "nginx-vhosts.yml"
+    if not vhosts_yml.exists():
+        print(f"  nginx-vhosts.yml not found")
+        return False
+
+    text = vhosts_yml.read_text()
+    if re.search(rf"^\s*-\s*name:\s*{re.escape(app_name)}\s*$", text, re.M):
+        print(f"  vhost '{app_name}' already in nginx-vhosts.yml")
+        return False
+
+    m = re.search(r"(^\s*nginx_vhosts:\s*\n)((?:\s*-\s*name:.*\n(?:\s+.*\n)*)+)",
+                  text, re.M)
+    if not m:
+        print(f"  Could not locate nginx_vhosts: block")
+        return False
+
+    block = m.group(2)
+    first_line = block.splitlines()[0]
+    indent = first_line[: len(first_line) - len(first_line.lstrip())]
+    child = indent + "  "
+    entry = (
+        f"\n{indent}- name: {app_name}\n"
+        f"{child}server_name: {fqdn}\n"
+        f"{child}cert: {apex}\n"
+        f"{child}upstream: http://{upstream_host}:{port}\n"
+    )
+    insert_at = m.end(2)
+    text = text[:insert_at] + entry + text[insert_at:]
+    vhosts_yml.write_text(text)
+    print(f"  Added vhost '{app_name}' -> {fqdn} -> http://{upstream_host}:{port}")
+    return True
+
+
+def add_scottycore_app(app_name: str, target_host: str, port: int,
+                       repo_url: str, branch: str) -> bool:
+    """Append an entry to scottycore-apps.yml."""
+    if not _scottylab_available():
+        return False
+    apps_yml = SCOTTYLAB_WORKLOADS / "scottycore-apps.yml"
+    if not apps_yml.exists():
+        print(f"  scottycore-apps.yml not found (expected template to be checked in)")
+        return False
+
+    text = apps_yml.read_text()
+    if re.search(rf"^\s*-\s*name:\s*{re.escape(app_name)}\s*$", text, re.M):
+        print(f"  scottycore-apps entry '{app_name}' already present")
+        return False
+
+    # Handle first-time case (scottycore_apps: [] with no entries yet)
+    empty = re.search(r"(^(\s*)scottycore_apps:\s*)\[\]\s*$", text, re.M)
+    if empty:
+        indent = empty.group(2) + "  "
+        child = indent + "  "
+        entry = (
+            f"\n{indent}- name: {app_name}\n"
+            f"{child}host: {target_host}\n"
+            f"{child}port: {port}\n"
+            f"{child}repo: {repo_url}\n"
+            f"{child}branch: {branch}"
+        )
+        text = text[:empty.start(0)] + empty.group(1).rstrip() + entry + text[empty.end(0):]
+        apps_yml.write_text(text)
+        print(f"  Added scottycore-apps entry '{app_name}' -> {target_host} (first entry)")
+        return True
+
+    m = re.search(r"(^\s*scottycore_apps:\s*\n)((?:\s*-\s*name:.*\n(?:\s+.*\n)*)+)",
+                  text, re.M)
+    if not m:
+        print(f"  Could not locate scottycore_apps: block")
+        return False
+
+    block = m.group(2)
+    first_line = block.splitlines()[0]
+    indent = first_line[: len(first_line) - len(first_line.lstrip())]
+    child = indent + "  "
+    entry = (
+        f"\n{indent}- name: {app_name}\n"
+        f"{child}host: {target_host}\n"
+        f"{child}port: {port}\n"
+        f"{child}repo: {repo_url}\n"
+        f"{child}branch: {branch}\n"
+    )
+    insert_at = m.end(2)
+    text = text[:insert_at] + entry + text[insert_at:]
+    apps_yml.write_text(text)
+    print(f"  Added scottycore-apps entry '{app_name}' -> {target_host}")
+    return True
+
+
+def commit_scottylab_changes(app_name: str) -> bool:
+    """Commit + push scottylab infra declarations."""
+    if not _scottylab_available():
+        return False
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(SCOTTYLAB_DIR)] + list(args),
+            capture_output=True, text=True, timeout=30,
+        )
+
+    git("add",
+        "automation/ansible/playbooks/workloads/nginx-certs.yml",
+        "automation/ansible/playbooks/workloads/nginx-vhosts.yml",
+        "automation/ansible/playbooks/workloads/scottycore-apps.yml")
+
+    status = git("diff", "--cached", "--stat")
+    if not status.stdout.strip():
+        print(f"  No scottylab changes to commit")
+        return False
+
+    r = git("commit", "-m", f"feat: wire {app_name} into nginx + scottycore-apps")
+    if r.returncode != 0:
+        print(f"  scottylab commit failed: {r.stderr.strip()[:200]}")
+        return False
+    push = git("push")
+    if push.returncode == 0:
+        print(f"  Committed and pushed scottylab changes")
+    else:
+        print(f"  Committed locally but push failed: {push.stderr.strip()[:200]}")
     return True
 
 
@@ -544,6 +762,7 @@ def commit_app_changes(app_path: Path, app_name: str) -> bool:
     git("add", "CLAUDE.md",
         ".forgejo/workflows/promote-scan.yml",
         ".forgejo/workflows/scottycore-upgrade.yml",
+        "docker-compose.yml",
         "pyproject.toml")
 
     # Check if there's anything to commit
@@ -757,7 +976,10 @@ def main():
     app_name = None
     stack = None
     github_repo = None
+    domain = None
+    port_override = None
     skip_forgejo = "--skip-forgejo" in args
+    skip_infra = "--skip-infra" in args
     scaffold_flag = "--scaffold" in args
 
     for i, arg in enumerate(args):
@@ -767,6 +989,10 @@ def main():
             stack = args[i + 1]
         if arg == "--github-repo" and i + 1 < len(args):
             github_repo = args[i + 1]
+        if arg == "--domain" and i + 1 < len(args):
+            domain = args[i + 1]
+        if arg == "--port" and i + 1 < len(args):
+            port_override = int(args[i + 1])
 
     if app_name is None:
         app_name = app_path.name.lower().replace(" ", "-")
@@ -838,9 +1064,19 @@ def main():
     else:
         print(f"  --skip-forgejo: skipping Forgejo repo creation")
 
+    # Port assignment + FQDN
+    existing_apps = load_apps_config()
+    port = port_override if port_override is not None else pick_next_port(existing_apps)
+    apex = DEFAULT_DOMAIN_APEX if not domain else domain.split(".", 1)[1] if "." in domain else domain
+    fqdn = domain if domain else f"{app_name}.{DEFAULT_DOMAIN_APEX}"
+
     # Step 2: Register
     print(f"\nStep 2: Register in config/apps.yaml")
-    register_app(app_path, app_name, stack, branch)
+    register_app(app_path, app_name, stack, branch, port, fqdn)
+
+    # Step 2b: Emit docker-compose.yml into the scaffolded app
+    print(f"\nStep 2b: Render docker-compose.yml into app")
+    install_docker_compose(app_path, app_name, port)
 
     # Step 3: Manager agent
     print(f"\nStep 3: Scaffold manager agent")
@@ -866,6 +1102,16 @@ def main():
     if upgrade_installed:
         print(f"\nStep 5d: Add {app_name} to scottycore release.yml APPS")
         add_to_release_apps(app_name)
+
+    # Step 5e: Declare infra in scottylab (cert apex, nginx vhost, scottycore-apps)
+    if not skip_infra:
+        print(f"\nStep 5e: Declare infra in scottylab")
+        target_host = f"{app_name}.melbourne"
+        repo_url = f"{FORGEJO_BASE}/{FORGEJO_USER}/{app_name}.git"
+        add_nginx_cert_apex(apex)
+        add_nginx_vhost(app_name, fqdn, apex, target_host, port)
+        add_scottycore_app(app_name, target_host, port, repo_url, branch)
+        commit_scottylab_changes(app_name)
 
     # Step 6: Commit + push app changes
     print(f"\nStep 6: Commit and push app changes")
@@ -893,11 +1139,28 @@ def main():
     print(f"  - .forgejo/workflows/scottycore-upgrade.yml installed (downward)")
     print(f"  - FORGEJO_TOKEN set as repo-scoped Actions secret")
     print(f"  - {app_name} added to scottycore release.yml APPS fan-out")
+    print(f"  - docker-compose.yml rendered (port {port})")
+    if not skip_infra:
+        print(f"  - scottylab: {apex} added to nginx-certs.yml (new apex, if not present)")
+        print(f"  - scottylab: {fqdn} -> http://{app_name}.melbourne:{port} added to nginx-vhosts.yml")
+        print(f"  - scottylab: {app_name} added to scottycore-apps.yml deploy list")
     print(f"  - All changes committed and pushed")
-    print(f"\n  Next steps (manual, only if needed):")
-    print(f"  - If the app doesn't have a root pyproject.toml, the downward")
-    print(f"    pipeline was deferred — adapt scottycore-upgrade.yml to the")
-    print(f"    app's layout and add {app_name} to release.yml APPS manually.")
+    print(f"\n  To bring it online (run from an ansible-capable host):")
+    print(f"    cd /script/scottylab/automation/ansible")
+    print(f"    # 1) Provision the LXC on proxmox1 (auto-assigns VMID)")
+    print(f"    ssh 192.168.150.101 'pct create $(pvesh get /cluster/nextid) \\")
+    print(f"        local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \\")
+    print(f"        --hostname {app_name}.melbourne --unprivileged 1 --features nesting=1 \\")
+    print(f"        --cores 2 --memory 2048 --rootfs rbd_nvme_storage:16 \\")
+    print(f"        --net0 name=eth0,bridge=vmbr0,ip=dhcp,tag=150 --onboot 1 --start 1'")
+    print(f"    # 2) Install Docker on the new LXC")
+    print(f"    ansible-playbook -i inventory/hosts.yml playbooks/workloads/docker.yml \\")
+    print(f"        -l {app_name}.melbourne")
+    print(f"    # 3) Issue cert (if new apex) + deploy app + publish vhost")
+    print(f"    ansible-playbook -i inventory/hosts.yml playbooks/workloads/nginx-certs.yml")
+    print(f"    ansible-playbook -i inventory/hosts.yml playbooks/workloads/scottycore-apps.yml \\")
+    print(f"        -l {app_name}.melbourne")
+    print(f"    ansible-playbook -i inventory/hosts.yml playbooks/workloads/nginx-vhosts.yml")
     print()
 
 
