@@ -8,15 +8,16 @@ workflows, pre-commit extraction-candidate nudge hook, manager agent
 with GREEN/YELLOW/RED classification responsibility.
 
 What it does:
-  1. Creates Forgejo repo + sets up dual-remote push (Forgejo + GitHub)
-  2. Adds the app to config/apps.yaml
-  3. Scaffolds a manager agent in .claude/agents/<app>-manager.md
-  4. Injects a ScottyCore Pipeline section into the app's CLAUDE.md
-  5. Installs the pre-commit /promote nudge hook
-  6. Installs .forgejo/workflows/promote-scan.yml
-  7. Commits the generated files in the app repo
-  8. Pushes to both remotes
-  9. Commits the scottycore-side changes (apps.yaml, agent)
+  1. Creates Forgejo repo (via API) + GitHub repo (via `gh`) + dual-remote push
+  2. Pushes FORGEJO_TOKEN as a repo-scoped Actions secret (via API)
+  3. Adds the app to config/apps.yaml
+  4. Scaffolds a manager agent in .claude/agents/<app>-manager.md
+  5. Injects a ScottyCore Pipeline section into the app's CLAUDE.md
+  6. Installs the pre-commit /promote nudge hook
+  7. Installs .forgejo/workflows/promote-scan.yml (upward pipeline)
+  8. Installs .forgejo/workflows/scottycore-upgrade.yml (downward pipeline)
+  9. Adds the app to scottycore's release.yml APPS fan-out list
+ 10. Commits + pushes app repo + scottycore-side changes
 
 Usage:
     python3 scripts/scottycore-init.py /path/to/app                # interactive
@@ -105,6 +106,74 @@ def create_forgejo_repo(app_name: str, description: str, default_branch: str) ->
         return None
 
 
+def set_forgejo_secret(app_name: str, secret_name: str, secret_value: str) -> bool:
+    """Set a repo-scoped Actions secret on the new Forgejo repo.
+
+    Uses PUT /api/v1/repos/{owner}/{repo}/actions/secrets/{name} which
+    upserts. Required so the promote-scan + scottycore-upgrade workflows
+    can call back into Forgejo (create PRs, dispatch workflows, comment).
+    """
+    token = _read_forgejo_token()
+    if not token:
+        print(f"  No Forgejo token — cannot set {secret_name} secret")
+        return False
+
+    payload = json.dumps({"data": secret_value}).encode()
+    req = urllib.request.Request(
+        f"{FORGEJO_BASE}/api/v1/repos/{FORGEJO_USER}/{app_name}/actions/secrets/{secret_name}",
+        data=payload,
+        method="PUT",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"token {token}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            code = resp.status
+        if code in (201, 204):
+            print(f"  Set repo secret {secret_name} on Forgejo")
+            return True
+        print(f"  Unexpected response setting {secret_name}: HTTP {code}")
+        return False
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        print(f"  Forgejo secrets API error ({e.code}): {body[:200]}")
+        return False
+    except Exception as e:
+        print(f"  Forgejo secrets connection error: {e}")
+        return False
+
+
+def create_github_repo(app_name: str, description: str, private: bool = True) -> bool:
+    """Create a GitHub repo via `gh repo create`. Idempotent: treats
+    'already exists' as success. Requires `gh` authenticated.
+    """
+    probe = subprocess.run(
+        ["gh", "repo", "view", f"{GITHUB_USER}/{app_name}"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if probe.returncode == 0:
+        print(f"  GitHub repo already exists: github.com/{GITHUB_USER}/{app_name}")
+        return True
+
+    visibility = "--private" if private else "--public"
+    result = subprocess.run(
+        ["gh", "repo", "create", f"{GITHUB_USER}/{app_name}",
+         visibility, "--description", description],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode == 0:
+        print(f"  Created GitHub repo: github.com/{GITHUB_USER}/{app_name}")
+        return True
+    err = result.stderr.strip()
+    if "already exists" in err.lower():
+        print(f"  GitHub repo already exists: github.com/{GITHUB_USER}/{app_name}")
+        return True
+    print(f"  gh repo create failed: {err[:200]}")
+    return False
+
+
 def setup_dual_remote(app_path: Path, forgejo_url: str, github_url: str, branch: str) -> bool:
     """Configure dual-remote: origin fetches from Forgejo, pushes to both."""
 
@@ -124,13 +193,17 @@ def setup_dual_remote(app_path: Path, forgejo_url: str, github_url: str, branch:
         print(f"  Dual-remote already configured")
         return True
 
-    # Set origin to Forgejo (fetch)
-    git("remote", "set-url", "origin", forgejo_url)
+    # Ensure origin exists (add if missing, set-url if already configured)
+    if "origin" in remotes:
+        git("remote", "set-url", "origin", forgejo_url)
+    else:
+        git("remote", "add", "origin", forgejo_url)
     # Set origin push to both Forgejo and GitHub
     git("remote", "set-url", "--push", "origin", forgejo_url)
     git("remote", "set-url", "--add", "--push", "origin", github_url)
-    # Add github as a separate remote for convenience
-    git("remote", "add", "github", github_url)
+    # Add github as a separate remote for convenience (no-op if already present)
+    if "github" not in remotes:
+        git("remote", "add", "github", github_url)
 
     print(f"  Configured dual-remote:")
     print(f"    origin fetch: {forgejo_url}")
@@ -354,6 +427,70 @@ def install_promote_scan_workflow(app_path: Path, app_name: str) -> bool:
     return True
 
 
+def install_scottycore_upgrade_workflow(app_path: Path, app_name: str, branch: str) -> bool:
+    """Install .forgejo/workflows/scottycore-upgrade.yml in the app repo.
+
+    This is the downward half of the pipeline — receives workflow_dispatch
+    from scottycore's release.yml on a tagged release, bumps the pin, opens
+    a PR, and has the manager agent classify it GREEN/YELLOW/RED.
+
+    Template placeholders: __APP_NAME__, __BRANCH__.
+    Only installed if the app has a root pyproject.toml — without one, the
+    pin-bump step has nothing to edit.
+    """
+    if not (app_path / "pyproject.toml").exists():
+        print(f"  No root pyproject.toml in {app_name} — deferring scottycore-upgrade.yml")
+        return False
+
+    src = CORE_DIR / ".claude" / "templates" / "scottycore-upgrade.yml"
+    if not src.exists():
+        print(f"  template missing at {src}")
+        return False
+
+    workflows_dir = app_path / ".forgejo" / "workflows"
+    dest = workflows_dir / "scottycore-upgrade.yml"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+
+    rendered = src.read_text().replace("__APP_NAME__", app_name).replace("__BRANCH__", branch)
+    dest.write_text(rendered)
+    print(f"  installed .forgejo/workflows/scottycore-upgrade.yml in {app_name}")
+    return True
+
+
+def add_to_release_apps(app_name: str) -> bool:
+    """Add app to scottycore's .forgejo/workflows/release.yml APPS fan-out list.
+
+    The release workflow dispatches `scottycore-upgrade` to every app in
+    this list on every tagged release. Idempotent — no-op if already present.
+    """
+    release_yml = CORE_DIR / ".forgejo" / "workflows" / "release.yml"
+    if not release_yml.exists():
+        print(f"  release.yml not found at {release_yml}")
+        return False
+
+    text = release_yml.read_text()
+
+    m = re.search(r"(APPS:\s*>-\n)((?:[ \t]+\S+\n)+)", text)
+    if not m:
+        print(f"  Could not locate APPS: block in release.yml")
+        return False
+
+    block = m.group(2)
+    tokens = block.split()
+    if app_name in tokens:
+        print(f"  {app_name} already in release.yml APPS")
+        return False
+
+    first_line = block.splitlines()[0]
+    indent = first_line[: len(first_line) - len(first_line.lstrip())]
+    new_block = block.rstrip() + f"\n{indent}{app_name}\n"
+    text = text[: m.start(2)] + new_block + text[m.end(2) :]
+
+    release_yml.write_text(text)
+    print(f"  Added {app_name} to release.yml APPS fan-out list")
+    return True
+
+
 def install_promote_nudge_hook(app_path: Path, app_name: str) -> bool:
     """Install the pre-commit /promote nudge hook into the app's .git/hooks.
 
@@ -404,7 +541,10 @@ def commit_app_changes(app_path: Path, app_name: str) -> bool:
         )
 
     # Stage the files we generated
-    git("add", "CLAUDE.md", ".forgejo/workflows/promote-scan.yml", "pyproject.toml")
+    git("add", "CLAUDE.md",
+        ".forgejo/workflows/promote-scan.yml",
+        ".forgejo/workflows/scottycore-upgrade.yml",
+        "pyproject.toml")
 
     # Check if there's anything to commit
     status = git("diff", "--cached", "--stat")
@@ -424,10 +564,16 @@ def commit_app_changes(app_path: Path, app_name: str) -> bool:
         return False
 
 
-def push_app(app_path: Path, branch: str) -> bool:
-    """Push app repo to all remotes."""
+def push_app(app_path: Path, branch: str, force: bool = False) -> bool:
+    """Push app repo to all remotes. `force` is used on first onboarding
+    to overwrite any stale history on freshly-created remotes (e.g. a
+    reused GitHub repo that held commits from a prior attempt).
+    """
+    cmd = ["git", "-C", str(app_path), "push", "-u", "origin", branch]
+    if force:
+        cmd.insert(cmd.index("push") + 1, "--force")
     result = subprocess.run(
-        ["git", "-C", str(app_path), "push", "-u", "origin", branch],
+        cmd,
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode == 0:
@@ -446,7 +592,9 @@ def commit_scottycore_changes(app_name: str) -> bool:
             capture_output=True, text=True, timeout=30,
         )
 
-    git("add", "config/apps.yaml", f".claude/agents/{app_name}-manager.md")
+    git("add", "config/apps.yaml",
+        f".claude/agents/{app_name}-manager.md",
+        ".forgejo/workflows/release.yml")
 
     status = git("diff", "--cached", "--stat")
     if not status.stdout.strip():
@@ -670,6 +818,10 @@ def main():
         github_url = f"https://github.com/{GITHUB_USER}/{app_name}.git"
         print(f"  Assuming GitHub repo: {github_url}")
 
+    # GitHub repo (idempotent; needed before first dual-push)
+    if not detect_github_remote(app_path):
+        create_github_repo(app_name, description=f"Scotty app: {stack}")
+
     if not skip_forgejo:
         forgejo_url = create_forgejo_repo(
             app_name,
@@ -678,6 +830,11 @@ def main():
         )
         if forgejo_url:
             setup_dual_remote(app_path, forgejo_url, github_url, branch)
+            # Push FORGEJO_TOKEN to the new repo so its workflows can
+            # create PRs, dispatch workflows, and post commit comments.
+            token = _read_forgejo_token()
+            if token:
+                set_forgejo_secret(app_name, "FORGEJO_TOKEN", token)
     else:
         print(f"  --skip-forgejo: skipping Forgejo repo creation")
 
@@ -697,15 +854,26 @@ def main():
     print(f"\nStep 5a: Install pre-commit /promote nudge hook")
     install_promote_nudge_hook(app_path, app_name)
 
-    # Step 5b: Install server-side promote-scan workflow (authoritative)
-    print(f"\nStep 5b: Install promote-scan.yml workflow")
+    # Step 5b: Install server-side promote-scan workflow (authoritative upward)
+    print(f"\nStep 5b: Install promote-scan.yml workflow (upward pipeline)")
     install_promote_scan_workflow(app_path, app_name)
+
+    # Step 5c: Install scottycore-upgrade workflow (downward pipeline)
+    print(f"\nStep 5c: Install scottycore-upgrade.yml workflow (downward pipeline)")
+    upgrade_installed = install_scottycore_upgrade_workflow(app_path, app_name, branch)
+
+    # Step 5d: Add to scottycore release.yml APPS fan-out (only if upgrade.yml installed)
+    if upgrade_installed:
+        print(f"\nStep 5d: Add {app_name} to scottycore release.yml APPS")
+        add_to_release_apps(app_name)
 
     # Step 6: Commit + push app changes
     print(f"\nStep 6: Commit and push app changes")
     committed = commit_app_changes(app_path, app_name)
     if committed:
-        push_app(app_path, branch)
+        # Force on first onboarding: the remotes were just provisioned
+        # (or reused), and the scaffold is the authoritative starting point.
+        push_app(app_path, branch, force=True)
 
     # Step 7: Commit + push scottycore changes
     print(f"\nStep 7: Commit and push scottycore changes")
@@ -721,13 +889,15 @@ def main():
     print(f"  - Manager agent created in scottycore/.claude/agents/")
     print(f"  - ScottyCore Pipeline section injected into CLAUDE.md")
     print(f"  - Pre-commit /promote nudge hook installed")
-    print(f"  - .forgejo/workflows/promote-scan.yml installed")
+    print(f"  - .forgejo/workflows/promote-scan.yml installed (upward)")
+    print(f"  - .forgejo/workflows/scottycore-upgrade.yml installed (downward)")
+    print(f"  - FORGEJO_TOKEN set as repo-scoped Actions secret")
+    print(f"  - {app_name} added to scottycore release.yml APPS fan-out")
     print(f"  - All changes committed and pushed")
-    print(f"\n  Next steps (manual):")
-    print(f"  - Set FORGEJO_TOKEN secret at:")
-    print(f"      {FORGEJO_BASE}/{FORGEJO_USER}/{app_name}/settings/actions/secrets")
-    print(f"  - If app has root pyproject.toml, install scottycore-upgrade.yml")
-    print(f"      and add {app_name} to scottycore/.forgejo/workflows/release.yml APPS")
+    print(f"\n  Next steps (manual, only if needed):")
+    print(f"  - If the app doesn't have a root pyproject.toml, the downward")
+    print(f"    pipeline was deferred — adapt scottycore-upgrade.yml to the")
+    print(f"    app's layout and add {app_name} to release.yml APPS manually.")
     print()
 
 

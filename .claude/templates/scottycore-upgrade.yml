@@ -1,0 +1,331 @@
+name: scottycore-upgrade
+
+# Triggered by workflow_dispatch from scottycore's release.yml.
+# Opens a bump PR, runs CI, invokes the scottystrike-manager agent for
+# autonomous classification (Green/Yellow/Red), then:
+#   Green  → auto-merge, no notification
+#   Yellow → auto-merge + open follow-up adoption issue, no notification
+#   Red    → leave PR open, post analysis comment, fire Hubitat P2 alert
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New scottycore version (e.g. 0.2.0)'
+        required: true
+        type: string
+      tag:
+        description: 'Tag (e.g. v0.2.0)'
+        required: true
+        type: string
+      changelog:
+        description: 'Release notes markdown'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  FORGEJO_BASE: https://forgejo.scotty.consulting
+  REPO: scotty/__APP_NAME__
+  BRANCH_PREFIX: scottycore-upgrade
+
+jobs:
+  bump:
+    runs-on: [self-hosted, linux]
+    container:
+      image: scottycore-runner:latest
+      # Bind-mount host Claude Code state + Hubitat config from CT118.
+      # `claude -p` uses the host's existing Max subscription — no API key needed.
+      # Claude needs BOTH ~/.claude/ (dir: sessions+creds) AND ~/.claude.json
+      # (single file: global config). rw so refreshed tokens persist.
+      options: >-
+        -v /root/.claude:/root/.claude
+        -v /root/.claude.json:/root/.claude.json
+        -v /root/.config/scottycore-hubitat.json:/root/.config/scottycore-hubitat.json:ro
+    env:
+      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+    steps:
+      - name: checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: __BRANCH__
+          fetch-depth: 0
+          token: ${{ secrets.FORGEJO_TOKEN }}
+
+      - name: configure git
+        run: |
+          git config user.name "scottycore-bot"
+          git config user.email "bot@scotty.consulting"
+          git config --global --add safe.directory "$PWD"
+
+      - name: create bump branch
+        id: branch
+        run: |
+          BRANCH="${BRANCH_PREFIX}/${{ inputs.tag }}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          # If a stale branch exists from a prior failed run, force-delete it
+          # on the remote so our push succeeds with a clean history. Only this
+          # workflow ever writes to scottycore-upgrade/* branches, so clobbering
+          # is safe by convention.
+          BRANCH_ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$BRANCH")
+          curl -sS -X DELETE \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -o /dev/null -w "stale-branch cleanup: HTTP %{http_code}\n" \
+            "$FORGEJO_BASE/api/v1/repos/$REPO/branches/$BRANCH_ENC" || true
+          git switch -c "$BRANCH"
+
+      - name: bump pyproject dependency
+        id: bump
+        run: |
+          python3 <<'PY'
+          import os, re, pathlib
+          version = "${{ inputs.version }}"
+          p = pathlib.Path("pyproject.toml")
+          text = p.read_text()
+          pattern = r'(scottycore\s*@\s*git\+https://forgejo\.scotty\.consulting/scotty/scottycore\.git@)v[0-9]+\.[0-9]+\.[0-9]+'
+          m = re.search(pattern, text)
+          if not m:
+              raise SystemExit("pyproject.toml does not contain a scottycore git+https dependency")
+          current = text[m.start():m.end()].split("@v")[-1]
+          new = re.sub(pattern, rf"\g<1>v{version}", text)
+          changed = (new != text)
+          if changed:
+              p.write_text(new)
+              print(f"Bumped scottycore {current} -> {version}")
+          else:
+              print(f"No-op: scottycore already pinned at v{version}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"changed={'true' if changed else 'false'}\n")
+          PY
+
+      - name: write upgrade notes
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          cat > SCOTTYCORE_UPGRADE_NOTES.md <<'NOTES'
+          ${{ inputs.changelog }}
+          NOTES
+
+      - name: run CI (tests + build)
+        id: ci
+        if: steps.bump.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          python3 -m pip install --break-system-packages --quiet -e ".[dev]" 2>&1 | tail -5
+          set +e
+          pytest -q 2>&1 | tee /tmp/pytest.log
+          TEST_EXIT=$?
+          ruff check scottystrike 2>&1 | tee /tmp/ruff.log
+          RUFF_EXIT=$?
+          echo "test_exit=$TEST_EXIT" >> "$GITHUB_OUTPUT"
+          echo "ruff_exit=$RUFF_EXIT" >> "$GITHUB_OUTPUT"
+          if [ "$TEST_EXIT" != "0" ] || [ "$RUFF_EXIT" != "0" ]; then
+            echo "ci_green=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ci_green=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: commit + push bump
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          git add pyproject.toml SCOTTYCORE_UPGRADE_NOTES.md
+          git commit -m "chore: bump scottycore to ${{ inputs.tag }}"
+          git push origin "${{ steps.branch.outputs.branch }}"
+
+      - name: open pull request
+        id: pr
+        if: steps.bump.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build the request body with python (jq rejects control chars in strings;
+          # Forgejo sometimes returns response bodies containing raw newlines).
+          export TAG="${{ inputs.tag }}"
+          export HEAD_REF="${{ steps.branch.outputs.branch }}"
+          export CI_GREEN="${{ steps.ci.outputs.ci_green }}"
+          python3 <<'PY' > /tmp/pr-request.json
+          import json, os
+          body = (
+              "Automated upgrade PR opened by scottycore release workflow.\n\n"
+              f"- Target: scottycore {os.environ['TAG']}\n"
+              f"- CI green: {os.environ['CI_GREEN']}\n"
+              "- See `SCOTTYCORE_UPGRADE_NOTES.md` for full changelog.\n\n"
+              "The scottystrike-manager agent will post a classification comment "
+              "(Green / Yellow / Red) below. Red requires human review.\n"
+          )
+          print(json.dumps({
+              "title": f"chore: bump scottycore to {os.environ['TAG']}",
+              "body": body,
+              "head": os.environ["HEAD_REF"],
+              "base": "__BRANCH__",
+          }))
+          PY
+
+          curl -fsSL -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$FORGEJO_BASE/api/v1/repos/$REPO/pulls" \
+            --data @/tmp/pr-request.json \
+            > /tmp/pr-response.json
+
+          # Parse with python + strict=False to tolerate raw control chars that
+          # Forgejo occasionally emits inside string fields.
+          python3 <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open("/tmp/pr-response.json") as f:
+              raw = f.read()
+          data = json.loads(raw, strict=False)
+          print(f"number={data['number']}")
+          print(f"url={data['html_url']}")
+          PY
+
+          echo "--- pr-response (first 400 bytes) ---"
+          head -c 400 /tmp/pr-response.json
+
+      - name: agent review + classify
+        id: review
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          mkdir -p /tmp/review
+          cp SCOTTYCORE_UPGRADE_NOTES.md /tmp/review/
+          cp /tmp/pytest.log /tmp/review/pytest.log 2>/dev/null || echo "no pytest log" > /tmp/review/pytest.log
+          cp /tmp/ruff.log /tmp/review/ruff.log 2>/dev/null || echo "no ruff log" > /tmp/review/ruff.log
+
+          PROMPT=$(cat <<'PROMPT'
+          You are the scottystrike-manager agent performing an autonomous upgrade-PR review.
+
+          A new scottycore release (${{ inputs.tag }}) has been proposed. Your job is to
+          classify the upgrade as Green, Yellow, or Red.
+
+          Read these files:
+          - SCOTTYCORE_UPGRADE_NOTES.md — release changelog
+          - /tmp/review/pytest.log — test output
+          - /tmp/review/ruff.log — lint output
+          - pyproject.toml — the dependency bump (already applied)
+
+          CI green: ${{ steps.ci.outputs.ci_green }}
+
+          Classification rules:
+          GREEN = CI passes AND no Breaking Changes AND no feature clearly relevant
+          YELLOW = CI passes AND (clear adoption opportunity OR medium-impact change)
+          RED = CI fails OR breaking change touches this code OR security action needed OR unsure
+
+          For breaking changes, grep this repo for affected call sites.
+
+          Output ONLY a single JSON object, nothing else. Schema:
+            {"classification": "GREEN"|"YELLOW"|"RED",
+             "comment": "markdown body (3-6 sentences)",
+             "follow_up_issue": "issue title if YELLOW else empty string"}
+          PROMPT
+          )
+
+          # Capture Claude's response text. --output-format json wraps it in a
+          # meta-envelope ({type,result,cost_usd,...}); we extract .result.
+          set +e
+          claude -p "$PROMPT" --output-format json > /tmp/review/claude-raw.json 2>&1
+          CLAUDE_EXIT=$?
+          set -e
+
+          echo "--- claude exit: $CLAUDE_EXIT ---"
+          head -c 2000 /tmp/review/claude-raw.json
+          echo
+
+          # Parse defensively. Default to RED on any parse failure so we surface
+          # the problem instead of silently merging.
+          python3 <<'PY'
+          import json, re, os, sys
+
+          def write_result(cls, comment, follow_up=""):
+              result = {"classification": cls, "comment": comment, "follow_up_issue": follow_up}
+              with open("/tmp/review/result.json", "w") as f:
+                  json.dump(result, f)
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write(f"class={cls}\n")
+              with open("/tmp/review/comment.md", "w") as f:
+                  f.write(comment)
+              with open("/tmp/review/follow_up.txt", "w") as f:
+                  f.write(follow_up)
+
+          try:
+              with open("/tmp/review/claude-raw.json") as f:
+                  raw = f.read()
+              # Unwrap --output-format json envelope
+              try:
+                  env = json.loads(raw)
+                  text = env.get("result") or env.get("response") or raw
+              except json.JSONDecodeError:
+                  text = raw
+              # Extract the first balanced {...} block from Claude's text
+              m = re.search(r'\{[\s\S]+\}', text)
+              if not m:
+                  raise ValueError(f"no JSON object in response; text was: {text[:500]}")
+              obj = json.loads(m.group())
+              cls = (obj.get("classification") or "").upper()
+              if cls not in ("GREEN", "YELLOW", "RED"):
+                  raise ValueError(f"unknown classification: {cls!r}")
+              write_result(cls, obj.get("comment", ""), obj.get("follow_up_issue", ""))
+              print(f"Parsed classification: {cls}")
+          except Exception as e:
+              msg = f"Agent review parse failed — defaulting to RED.\n\n```\n{e}\n```"
+              write_result("RED", msg, "")
+              print(f"PARSE FAIL: {e}", file=sys.stderr)
+          PY
+
+      - name: post classification comment
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          PR=${{ steps.pr.outputs.number }}
+          COMMENT_BODY=$(cat /tmp/review/comment.md)
+          CLASS="${{ steps.review.outputs.class }}"
+          FULL="**[${CLASS}]** Agent classification\n\n${COMMENT_BODY}"
+          curl -fsSL -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$FORGEJO_BASE/api/v1/repos/$REPO/issues/$PR/comments" \
+            -d "$(jq -n --arg b "$FULL" '{body:$b}')" > /dev/null
+
+      - name: act on classification
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          CLASS="${{ steps.review.outputs.class }}"
+          PR=${{ steps.pr.outputs.number }}
+          PR_URL="${{ steps.pr.outputs.url }}"
+
+          case "$CLASS" in
+            GREEN)
+              echo "Auto-merging PR #$PR (Green)"
+              curl -fsSL -X POST \
+                -H "Authorization: token $FORGEJO_TOKEN" \
+                -H "Content-Type: application/json" \
+                "$FORGEJO_BASE/api/v1/repos/$REPO/pulls/$PR/merge" \
+                -d '{"Do":"squash","merge_when_checks_succeed":false}'
+              ;;
+
+            YELLOW)
+              echo "Auto-merging PR #$PR (Yellow), opening follow-up issue"
+              curl -fsSL -X POST \
+                -H "Authorization: token $FORGEJO_TOKEN" \
+                -H "Content-Type: application/json" \
+                "$FORGEJO_BASE/api/v1/repos/$REPO/pulls/$PR/merge" \
+                -d '{"Do":"squash"}'
+              FU_TITLE=$(cat /tmp/review/follow_up.txt)
+              if [ -n "$FU_TITLE" ] && [ "$FU_TITLE" != "null" ]; then
+                curl -fsSL -X POST \
+                  -H "Authorization: token $FORGEJO_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  "$FORGEJO_BASE/api/v1/repos/$REPO/issues" \
+                  -d "$(jq -n \
+                        --arg t "$FU_TITLE" \
+                        --arg b "Follow-up from scottycore ${{ inputs.tag }} upgrade. See closed PR #$PR for context." \
+                        '{title:$t, body:$b, labels:[]}')" > /dev/null
+              fi
+              ;;
+
+            RED|*)
+              echo "Leaving PR #$PR open for human review (Red)"
+              notify-hubitat P2 "scottystrike scottycore-upgrade ${{ inputs.tag }} needs review: $PR_URL" || true
+              ;;
+          esac
