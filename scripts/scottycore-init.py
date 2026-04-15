@@ -63,6 +63,162 @@ PORT_BASE = 8100  # first scottybiz-era port; scan apps.yaml for next free
 # Default cert apex for new Scotty apps. Override with --domain <fqdn>.
 DEFAULT_DOMAIN_APEX = "corpaholics.com"
 
+# Cloudflare + Melbourne tunnel (used to publish apps externally)
+CF_API = "https://api.cloudflare.com/client/v4"
+CF_TUNNEL_ID = "1feb72d4-9b3c-4159-a668-e552a96846c8"  # melbourne
+CF_TUNNEL_HOSTNAME = f"{CF_TUNNEL_ID}.cfargotunnel.com"
+NGINX_HOST = "192.168.151.10"  # cloudflared + nginx reverse proxy
+
+# The CF DNS-01 token on the nginx LXC doubles as a Zone:DNS:Edit token.
+# Readable only by SSH'ing to the nginx host (root).
+CF_TOKEN_REMOTE_PATH = "/etc/letsencrypt/cloudflare.ini"
+
+
+def _ssh_read(host: str, path: str) -> str | None:
+    r = subprocess.run(
+        ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", host,
+         f"cat {path}"],
+        capture_output=True, text=True, timeout=15,
+    )
+    return r.stdout if r.returncode == 0 else None
+
+
+def _cf_token() -> str | None:
+    """Read the Cloudflare API token from the nginx LXC's certbot config."""
+    body = _ssh_read(NGINX_HOST, CF_TOKEN_REMOTE_PATH)
+    if not body:
+        return None
+    for line in body.splitlines():
+        if "dns_cloudflare_api_token" in line:
+            return line.split("=", 1)[1].strip()
+    return None
+
+
+def _cf_zone_id(token: str, apex: str) -> str | None:
+    req = urllib.request.Request(
+        f"{CF_API}/zones?name={apex}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            results = data.get("result", [])
+            return results[0]["id"] if results else None
+    except Exception as e:
+        print(f"  CF zone lookup failed: {e}")
+        return None
+
+
+def ensure_cf_cname(fqdn: str, apex: str) -> bool:
+    """Create a CNAME <fqdn> -> <tunnel>.cfargotunnel.com on Cloudflare
+    (proxied). Idempotent: no-op if an identical record already exists.
+    """
+    token = _cf_token()
+    if not token:
+        print(f"  No Cloudflare token available — skipping DNS")
+        return False
+    zone_id = _cf_zone_id(token, apex)
+    if not zone_id:
+        print(f"  Cloudflare zone '{apex}' not found — skipping DNS")
+        return False
+
+    name = fqdn.removesuffix(f".{apex}") if fqdn != apex else "@"
+    # Probe existing record
+    probe = urllib.request.Request(
+        f"{CF_API}/zones/{zone_id}/dns_records?type=CNAME&name={fqdn}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(probe, timeout=15) as resp:
+            existing = json.loads(resp.read()).get("result", [])
+    except Exception as e:
+        print(f"  CF DNS probe failed: {e}")
+        return False
+
+    if existing and existing[0].get("content") == CF_TUNNEL_HOSTNAME:
+        print(f"  CF CNAME {fqdn} already points to tunnel")
+        return True
+
+    payload = json.dumps({
+        "type": "CNAME",
+        "name": name,
+        "content": CF_TUNNEL_HOSTNAME,
+        "proxied": True,
+        "comment": "scottycore app — managed by scottycore-init.py",
+    }).encode()
+    method = "PUT" if existing else "POST"
+    url = (f"{CF_API}/zones/{zone_id}/dns_records/{existing[0]['id']}"
+           if existing else
+           f"{CF_API}/zones/{zone_id}/dns_records")
+    req = urllib.request.Request(
+        url, data=payload, method=method,
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        if data.get("success"):
+            print(f"  CF CNAME {fqdn} -> {CF_TUNNEL_HOSTNAME} ({method})")
+            return True
+        print(f"  CF DNS error: {data.get('errors')}")
+        return False
+    except urllib.error.HTTPError as e:
+        print(f"  CF DNS HTTP {e.code}: {e.read().decode()[:200]}")
+        return False
+
+
+def ensure_tunnel_ingress(fqdn: str) -> bool:
+    """Add a tunnel ingress rule for <fqdn> -> nginx on the melbourne
+    cloudflared config. SSH-edits /etc/cloudflared/config.yml on nginx
+    host; idempotent — no-op if the hostname rule is already present.
+    Restarts cloudflared after a change.
+    """
+    # Idempotency probe
+    check = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", NGINX_HOST,
+         f"grep -q 'hostname: {fqdn}' /etc/cloudflared/config.yml && echo present"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if "present" in check.stdout:
+        print(f"  tunnel ingress for {fqdn} already present")
+        return True
+
+    # Insert the new rule before the terminal `- service: http_status:404` line.
+    # Using a heredoc on the remote side keeps the script tiny and avoids
+    # quoting foot-guns around YAML whitespace.
+    remote_cmd = f"""
+set -e
+CONF=/etc/cloudflared/config.yml
+cp $CONF $CONF.bak.$(date +%s)
+python3 - <<'PY'
+import re
+conf = open('/etc/cloudflared/config.yml').read()
+rule = '''  - hostname: {fqdn}
+    service: http://localhost:80
+    originRequest:
+      httpHostHeader: {fqdn}
+'''
+# Insert before the terminal catch-all 404 rule
+pattern = r'(\\n)(\\s*- service:\\s*http_status:404\\s*\\n)'
+new = re.sub(pattern, r'\\1' + rule + r'\\2', conf, count=1)
+if new == conf:
+    raise SystemExit('catch-all rule not found — cannot insert')
+open('/etc/cloudflared/config.yml', 'w').write(new)
+PY
+cloudflared tunnel --config $CONF ingress validate >/dev/null
+systemctl restart cloudflared
+"""
+    r = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", NGINX_HOST, remote_cmd],
+        capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode != 0:
+        print(f"  tunnel ingress update failed: {r.stderr.strip()[:300]}")
+        return False
+    print(f"  tunnel ingress for {fqdn} added; cloudflared restarted")
+    return True
+
 
 # ── Step 1: Forgejo repo + dual-remote ───────────────────────────────────────
 
@@ -1124,6 +1280,12 @@ def main():
         add_nginx_vhost(app_name, fqdn, apex, target_host, port)
         add_scottycore_app(app_name, target_host, port, repo_url, branch)
         commit_scottylab_changes(app_name)
+
+    # Step 5f: Publish via Cloudflare (DNS CNAME + tunnel ingress)
+    if not skip_infra:
+        print(f"\nStep 5f: Publish {fqdn} via Cloudflare tunnel")
+        ensure_cf_cname(fqdn, apex)
+        ensure_tunnel_ingress(fqdn)
 
     # Step 6: Commit + push app changes
     print(f"\nStep 6: Commit and push app changes")
