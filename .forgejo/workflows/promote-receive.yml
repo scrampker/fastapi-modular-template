@@ -67,8 +67,24 @@ jobs:
           mkdir -p /tmp/source
           git clone "$FORGEJO_BASE/scotty/${{ inputs.source_app }}.git" /tmp/source/app
           git -C /tmp/source/app checkout "${{ inputs.source_commit }}"
+          TARGET="/tmp/source/app/${{ inputs.target_path }}"
+          echo "--- diagnostics: target resolution ---"
+          echo "expected: $TARGET"
+          if [ -e "$TARGET" ]; then
+            echo "exists: yes ($(stat -c '%s bytes, mode %a' "$TARGET" 2>/dev/null || echo '?'))"
+          else
+            echo "exists: NO — candidate files:"
+            # Strip leading 'app/' if present (common scaffold-vs-raw mismatch)
+            FALLBACK="/tmp/source/app/${{ inputs.target_path }}"
+            FALLBACK="${FALLBACK/\/tmp\/source\/app\/app\///tmp/source/app/}"
+            echo "  trying (app/-stripped): $FALLBACK"
+            [ -e "$FALLBACK" ] && echo "  FOUND at fallback path"
+            echo "  basename search in checkout:"
+            find /tmp/source/app -name "$(basename "${{ inputs.target_path }}")" -not -path '*/.*' 2>/dev/null | head -10
+            echo "  (classifier may have emitted a target_path with wrong layout assumption)"
+          fi
           echo "--- target path contents ---"
-          head -c 2000 "/tmp/source/app/${{ inputs.target_path }}" 2>&1 || echo "(target is a directory or non-text)"
+          head -c 2000 "$TARGET" 2>&1 || echo "(target is a directory or non-text)"
 
       - name: create extraction branch
         id: branch
