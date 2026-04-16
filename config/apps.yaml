@@ -17,13 +17,6 @@ scottycore:
 
 # ── Consumer apps ─────────────────────────────────────────────────────────────
 
-scottystrike:
-  path: /script/scottystrike
-  stack: FastAPI (from scottycore)
-  branch: master
-  # ScottyStrike uses Falcon OAuth2; most auth patterns are ignored.
-  # See .scottycore-patterns.yaml in the app root for details.
-
 scottyscribe:
   path: /script/scottyscribe
   stack: Flask + WhisperX + GPU
@@ -57,3 +50,10 @@ scottybiz:
   branch: master
   port: 8100
   fqdn: scottybiz.corpaholics.com
+
+scottystrike:
+  path: /script/scottystrike
+  stack: FastAPI (CrowdStrike LogScale parser toolkit)
+  branch: master
+  port: 8101
+  fqdn: scottystrike.scotty.consulting
