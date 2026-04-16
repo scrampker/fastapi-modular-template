@@ -15,14 +15,19 @@ permissions:
 
 env:
   FORGEJO_BASE: https://forgejo.scotty.consulting
-  # Apps that have .forgejo/workflows/scottycore-upgrade.yml wired.
-  # scottyscribe + scottyscan deferred — non-root-pyproject layouts need
-  # per-app adaptation. scottysync deferred — no remote configured yet.
+  # Apps that pip-depend on scottycore (have `scottycore @ git+...` in
+  # pyproject.toml dependencies). Only these benefit from upgrade dispatch.
+  #
+  # Dropped 2026-04-16 — don't use scottycore at all (would receive no-op
+  # upgrade dispatches, adding runner noise):
+  #   - scottysync (separate project; tunneled sync platform)
+  #   - scottomation (separate project; home automation platform)
+  #
+  # Deferred — non-root pyproject layouts need per-app adaptation:
+  #   - scottyscribe, scottyscan
   APPS: >-
     scottystrike
-    scottomation
     scottybiz
-    scottysync
     scottylab-app
 
 jobs:
