@@ -166,14 +166,27 @@ def set_forgejo_secret(app_name: str, secret_name: str, secret_value: str) -> bo
 def create_github_repo(app_name: str, description: str, private: bool = True) -> bool:
     """Create a GitHub repo via `gh repo create`. Idempotent: treats
     'already exists' as success. Requires `gh` authenticated.
+
+    Guards against GitHub's rename-alias trap: when a repo A is renamed to B,
+    the API keeps responding to A with B's data forever. A naive probe would
+    think A exists as a concrete repo and skip creation, then the caller's
+    first push would force-push over B's history. Here we fetch the canonical
+    full_name and only treat the probe as a hit when it matches the requested
+    name case-insensitively. A mismatch means A is a redirect alias and the
+    name is still free to claim.
     """
+    requested = f"{GITHUB_USER}/{app_name}"
     probe = subprocess.run(
-        ["gh", "repo", "view", f"{GITHUB_USER}/{app_name}"],
+        ["gh", "api", f"repos/{requested}", "--jq", ".full_name"],
         capture_output=True, text=True, timeout=15,
     )
     if probe.returncode == 0:
-        print(f"  GitHub repo already exists: github.com/{GITHUB_USER}/{app_name}")
-        return True
+        canonical = probe.stdout.strip()
+        if canonical.lower() == requested.lower():
+            print(f"  GitHub repo already exists: github.com/{requested}")
+            return True
+        print(f"  GitHub: {requested} is a rename-alias to {canonical}; "
+              f"claiming name with a fresh repo")
 
     visibility = "--private" if private else "--public"
     result = subprocess.run(
