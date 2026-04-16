@@ -45,10 +45,9 @@ from pathlib import Path
 CORE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CORE_DIR / "scripts"))
 
-# Toolkit — generic infrastructure primitives extracted to scottylab.
-# No pip install; we add automation/ to sys.path and import as scottylab_toolkit.
-sys.path.insert(0, "/script/scottylab/automation")
-
+# Toolkit — vendored at scripts/scottylab_toolkit/ as of 2026-04-16.
+# Previously pulled from /script/scottylab/automation/ via sys.path insert;
+# migrates to scottydev when Shape C repo split lands (v4 Q1).
 from config_loader import CONFIG_FILE, load_apps_config
 from scottylab_toolkit import (
     ansible_run, cloudflare, inventory as sl_inventory, lxc, nginx as sl_nginx,
