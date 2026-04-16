@@ -41,6 +41,7 @@ class UserContext(BaseModel):
     email: str
     display_name: str
     is_superadmin: bool
+    totp_enabled: bool = False
     tenant_roles: dict[str, RoleName]  # {tenant_slug: role}
 
 

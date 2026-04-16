@@ -34,6 +34,7 @@ class GlobalSettings(BaseModel):
     auth_providers: list[str] = ["local"]  # local, cloudflare, azure
     session_timeout_minutes: int = Field(15, ge=5, le=1440)
     password_min_length: int = Field(8, ge=6, le=128)
+    require_totp: bool = True
     retention_days_default: int = Field(90, ge=1, le=3650)
     branding_app_name: str = Field("MyApp", max_length=80)
     smtp_host: str | None = None

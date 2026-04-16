@@ -37,6 +37,45 @@ function authFetch(url, opts = {}) {
   });
 }
 
+/* ── Global fetch interceptor: auto-attach Bearer token for same-origin ── */
+
+(function installFetchInterceptor() {
+  const originalFetch = window.fetch;
+  window.fetch = function (input, init) {
+    init = init || {};
+    let url = typeof input === 'string' ? input : (input && input.url) || '';
+    // Only attach token for same-origin absolute/relative API paths
+    const isSameOrigin = url.startsWith('/') || url.startsWith(window.location.origin);
+    if (isSameOrigin) {
+      const token = Auth.getToken();
+      if (token) {
+        const headers = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
+        if (!headers.has('Authorization')) {
+          headers.set('Authorization', 'Bearer ' + token);
+        }
+        init.headers = headers;
+      }
+    }
+    return originalFetch.call(this, input, init).then(function (resp) {
+      if (!isSameOrigin || url.indexOf('/api/') === -1) return resp;
+      var path = window.location.pathname;
+      // Auto-logout on 401 (avoid redirect loop from /login itself)
+      if (resp.status === 401 && path !== '/login') {
+        Auth.logout();
+      }
+      // Redirect to 2FA setup on 403 + totp_setup_required
+      if (resp.status === 403 && path !== '/login' && path !== '/setup-2fa') {
+        resp.clone().json().then(function (body) {
+          if (body && body.totp_setup_required) {
+            window.location.href = '/setup-2fa';
+          }
+        }).catch(function () {});
+      }
+      return resp;
+    });
+  };
+})();
+
 /* ── HTMX global request header injection ─────────────────────────────── */
 
 document.addEventListener('htmx:configRequest', function (evt) {

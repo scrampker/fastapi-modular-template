@@ -13,7 +13,11 @@ from fastapi.staticfiles import StaticFiles
 from scottycore import __version__
 from scottycore.core.config import Settings, get_settings
 from scottycore.core.database import Base, get_engine, get_session_factory
-from scottycore.core.middleware import register_exception_handlers, register_security_headers
+from scottycore.core.middleware import (
+    register_exception_handlers,
+    register_security_headers,
+    register_totp_enforcement,
+)
 from scottycore.core.request_logging import RequestLoggingMiddleware, setup_logging
 from scottycore.core.schemas import HealthResponse
 from scottycore.core.service_registry import ServiceRegistry
@@ -120,8 +124,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Security headers + exception handlers
+    # Security headers + TOTP enforcement + exception handlers
     register_security_headers(app)
+    register_totp_enforcement(app)
     register_exception_handlers(app)
 
     # Request logging middleware (dual-mode: file + optional stdout for containers)

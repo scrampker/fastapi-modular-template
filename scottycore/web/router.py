@@ -48,6 +48,11 @@ async def login_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "login.html")
 
 
+@web_router.get("/setup-2fa", response_class=HTMLResponse, include_in_schema=False)
+async def setup_2fa_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "setup_2fa.html")
+
+
 # ── Tenant-scoped pages ───────────────────────────────────────────────────
 
 

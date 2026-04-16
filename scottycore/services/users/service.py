@@ -428,5 +428,6 @@ class UsersService:
             email=user_read.email,
             display_name=user_read.display_name,
             is_superadmin=user_read.is_superadmin,
+            totp_enabled=user_read.totp_enabled,
             tenant_roles=slug_roles,
         )
