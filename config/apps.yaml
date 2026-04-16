@@ -51,3 +51,10 @@ scottomation:
   branch: main
   port: 8099
   fqdn: scottomation.scotty.consulting
+
+scottysync:
+  path: /script/scottysync
+  stack: FastAPI (tunneled sync + productivity platform)
+  branch: master
+  port: 8443
+  fqdn: scottysync.scotty.consulting
