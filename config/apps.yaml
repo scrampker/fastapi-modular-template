@@ -50,7 +50,7 @@ scottomation:
   stack: FastAPI + React (automation platform)
   branch: main
   port: 8099
-  fqdn: scottomation.scotty.consulting
+  fqdn: go.scottomation.io
 
 scottysync:
   path: /script/scottysync
