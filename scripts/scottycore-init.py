@@ -458,13 +458,114 @@ See the app's `CLAUDE.md` for the concrete snippet.
 # ── Step 5: Inject ScottyCore section into app CLAUDE.md ────────────────────
 
 CLAUDE_SECTION_MARKER = "<!-- scottycore-integration -->"
+# Written at the top of every scaffolded CLAUDE.md so re-runs can detect and
+# replace a stale header without stomping on hand-authored content.
+APP_HEADER_MARKER = "<!-- scottycore-app-header -->"
 
-CLAUDE_TEMPLATE = """
+
+def _render_app_claude_md(app_name: str, stack: str, fqdn: str, port: int,
+                          lxc_vmid: int | None, lxc_ip: str | None) -> str:
+    """Build a fact-rich CLAUDE.md for a freshly-scaffolded scottycore app.
+
+    Bakes in the live deployment coordinates (LXC VMID + IP, container port,
+    public FQDN, nginx upstream) so future sessions have full context without
+    spelunking through scripts. A short `## Domain` stub nudges the first
+    human session to fill in what the app actually does.
+    """
+    vmid_str = f"CT {lxc_vmid}" if lxc_vmid is not None else "_not yet provisioned_"
+    ip_str = lxc_ip if lxc_ip else "_not yet provisioned_"
+    upstream_str = (f"http://{lxc_ip}:{port}" if lxc_ip
+                    else f"http://{app_name}.melbourne:{port} (placeholder)")
+
+    header = f"""# {app_name}
+
+{APP_HEADER_MARKER}
+> **Status: freshly scaffolded from scottycore. Domain logic is empty; the
+> container runs the unmodified framework and responds to `/health`.**
+>
+> First session move: fill in the `## Domain` section below with what this
+> app is actually supposed to do, then start building service modules under
+> `scottycore/services/`. Until then, every request beyond `/health` will
+> 404 — that's expected.
+
+## What this is
+
+A FastAPI app scaffolded from [scottycore](/script/scottycore). Inherits the
+full framework: auth (Cloudflare / Azure / JWT / API key), multi-tenant RBAC,
+4-tier settings KV, audit log, ai_backends multi-provider routing, admin API,
+request logging, TOTP. See `/script/scottycore/CLAUDE.md` for the framework
+reference; everything here is additive on top of that.
+
+## Live deployment
+
+| | |
+|---|---|
+| **Public URL** | https://{fqdn} |
+| **Nginx upstream** | {upstream_str} |
+| **LXC** | {vmid_str} on proxmox1 ({ip_str}) |
+| **Host port (Docker)** | `{port}` (container listens on 8000 internally) |
+| **Container image** | `{app_name}:latest` (built locally via `docker compose`) |
+| **Forgejo** | https://forgejo.scotty.consulting/scotty/{app_name} |
+| **GitHub (mirror)** | https://github.com/scrampker/{app_name} |
+
+## Deployment paths
+
+- **Dev (fast iterate)** — run directly on `192.168.150.6` via `launch.py`.
+  Listens on `:{port}` like the container does. Hot-reload via `--reload` if
+  you add it.
+- **Prod-in-a-box (normal)** — the LXC above, Docker via `docker-compose.yml`.
+  Redeploy with `ssh {ip_str or "<lxc-ip>"} 'cd /opt/scottycore/{app_name} \\
+  && git pull && docker compose up -d --build'`, or run
+  `ansible-playbook workloads/scottycore-apps.yml -l {app_name}.melbourne`
+  from `/script/scottylab/automation/ansible/`.
+
+## DNS path (for reference)
+
+```
+scottybiz.corpaholics.com
+     │
+     ├─ external (internet)    → Cloudflare proxy → melbourne tunnel → nginx vhost → upstream
+     └─ LAN (behind UniFi)     → UniFi local DNS  → nginx directly   → vhost       → upstream
+```
+
+The `*.corpaholics.com` UniFi wildcard + CF tunnel ingress were installed by
+`scottycore-init.py` and are idempotently reconciled on every re-run. Nothing
+to do here unless you're changing how requests route.
+
+## Domain
+
+_TBD — replace this section with what this app actually does, which service
+modules it needs under `scottycore/services/`, and any non-scottycore
+dependencies (GPU, Redis, external APIs, etc.)._
+
+## Useful commands
+
+```bash
+# Health check (external)
+curl -sSf https://{fqdn}/health
+
+# Health check (direct to LXC)
+curl -sSf http://{ip_str or "<lxc-ip>"}:{port}/health
+
+# Container logs
+ssh {ip_str or "<lxc-ip>"} 'docker logs scottybiz --tail 50'
+
+# Rebuild & restart container
+ssh {ip_str or "<lxc-ip>"} 'cd /opt/scottycore/{app_name} && docker compose up -d --build'
+
+# Reconcile everything (idempotent — heals any drift)
+python3 /script/scottycore/scripts/scottycore-init.py /script/{app_name} --name {app_name}
+```
+<!-- /scottycore-app-header -->
+
+"""
+
+    pipeline = f"""
 <!-- scottycore-integration -->
 ## ScottyCore Pipeline
 
-This app is part of the **Scotty app family** and depends on the
-[scottycore](/script/scottycore) package (pinned in `pyproject.toml` via
+This app depends on the [scottycore](/script/scottycore) package (pinned in
+`pyproject.toml` via
 `git+https://forgejo.scotty.consulting/scotty/scottycore.git@vX.Y.Z`).
 
 ### Automated pipeline
@@ -474,10 +575,9 @@ a `claude -p` classifier on the Python diff. If code looks like shared-library
 material, it dispatches scottycore's `promote-receive.yml` for autonomous
 extraction + release.
 
-**Downward — `.forgejo/workflows/scottycore-upgrade.yml`** (if installed):
-when scottycore cuts a release, this app receives a workflow_dispatch that
-bumps the pin, runs CI, and has the manager agent classify the PR as
-GREEN / YELLOW / RED.
+**Downward — `.forgejo/workflows/scottycore-upgrade.yml`**: when scottycore
+cuts a release, this app receives a workflow_dispatch that bumps the pin,
+runs CI, and has the manager agent classify the PR as GREEN / YELLOW / RED.
 
 ### `/promote` skill
 
@@ -497,7 +597,7 @@ git fetch --quiet origin
 TOKEN=$(cat ~/.config/forgejo-token 2>/dev/null)
 [ -n "$TOKEN" ] && for sha in $(git log -5 --format='%H' origin/master); do
     COMMENTS=$(curl -s -H "Authorization: token $TOKEN" \\
-      "https://forgejo.scotty.consulting/api/v1/repos/scotty/APP_NAME/commits/$sha/comments")
+      "https://forgejo.scotty.consulting/api/v1/repos/scotty/{app_name}/commits/$sha/comments")
     if echo "$COMMENTS" | grep -q '"body"'; then
         echo "=== $sha ==="
         echo "$COMMENTS" | python3 -c "import json,sys;[print(c['body']) for c in json.load(sys.stdin)]"
@@ -506,27 +606,63 @@ done
 ```
 Report any scottycore-bot comments before starting work.
 """
+    return header + pipeline
 
 
-def inject_claude_section(app_path: Path) -> bool:
-    """Add a ScottyCore section to the app's CLAUDE.md."""
+def write_app_claude_md(app_path: Path, app_name: str, stack: str, fqdn: str,
+                       port: int, lxc_vmid: int | None,
+                       lxc_ip: str | None) -> bool:
+    """Render a fact-rich CLAUDE.md for the app.
+
+    Idempotent — rewrites the auto-generated header (everything between the
+    two app-header markers) on every run so deployment facts stay fresh, but
+    preserves any content *after* the header markers that humans added.
+    """
     claude_md = app_path / "CLAUDE.md"
+    rendered = _render_app_claude_md(
+        app_name, stack, fqdn, port, lxc_vmid, lxc_ip,
+    )
 
     if not claude_md.exists():
-        print(f"  No CLAUDE.md found — creating one with ScottyCore section")
-        claude_md.write_text(f"# {app_path.name}\n{CLAUDE_TEMPLATE.replace('{app_path}', str(app_path))}")
+        claude_md.write_text(rendered)
+        print(f"  Wrote CLAUDE.md (fresh)")
         return True
 
-    content = claude_md.read_text()
+    existing = claude_md.read_text()
 
-    if CLAUDE_SECTION_MARKER in content:
-        print(f"  ScottyCore section already present in CLAUDE.md")
-        return False
+    # Scaffold copied scottycore's CLAUDE.md — recognize by its H1 and replace
+    # wholesale. Safe: a real app's CLAUDE.md starts with `# <app_name>`.
+    if existing.lstrip().startswith("# ScottyCore"):
+        claude_md.write_text(rendered)
+        print(f"  Replaced scottycore template CLAUDE.md with app-specific version")
+        return True
 
-    section = CLAUDE_TEMPLATE.replace("{app_path}", str(app_path))
-    content = content.rstrip() + "\n" + section
-    claude_md.write_text(content)
-    print(f"  Injected ScottyCore section into CLAUDE.md")
+    # Subsequent runs: replace the auto-generated header block in place.
+    if APP_HEADER_MARKER in existing:
+        start = existing.find(APP_HEADER_MARKER)
+        end_marker = "<!-- /scottycore-app-header -->"
+        end = existing.find(end_marker)
+        if start != -1 and end != -1:
+            # Find the H1 line that precedes the start marker so we refresh it too
+            h1_start = existing.rfind("\n# ", 0, start)
+            h1_start = 0 if h1_start == -1 else h1_start + 1
+            tail = existing[end + len(end_marker):].lstrip("\n")
+            claude_md.write_text(rendered + tail)
+            print(f"  Refreshed CLAUDE.md deployment facts")
+            return True
+
+    # First run against an unrecognized CLAUDE.md: prepend app header, keep rest.
+    if CLAUDE_SECTION_MARKER in existing:
+        # Already has pipeline section but no app header — inject header at top
+        # (after the first heading if present) and leave the rest alone.
+        claude_md.write_text(rendered.split("<!-- /scottycore-app-header -->")[0]
+                             + "<!-- /scottycore-app-header -->\n\n"
+                             + existing)
+        print(f"  Prepended app header to existing CLAUDE.md")
+        return True
+
+    claude_md.write_text(rendered)
+    print(f"  Wrote CLAUDE.md (replaced unknown content)")
     return True
 
 
@@ -1002,9 +1138,8 @@ def main():
     print(f"\nStep 3: Scaffold manager agent")
     scaffold_agent(app_name, app_path, stack)
 
-    # Step 4: CLAUDE.md injection
-    print(f"\nStep 4: Inject ScottyCore Pipeline section into CLAUDE.md")
-    inject_claude_section(app_path)
+    # Step 4: CLAUDE.md is written AFTER provisioning (Step 5e2) so the
+    # fact-rich header can bake in the real LXC VMID + IP. See below.
 
     # Step 5a: Install pre-commit nudge hook (early-warning, local)
     print(f"\nStep 5a: Install pre-commit /promote nudge hook")
@@ -1031,6 +1166,11 @@ def main():
         prov = lxc.provision(app_name)
         if prov:
             lxc_vmid, lxc_ip = prov
+
+    # Step 5e2: Write fact-rich CLAUDE.md with live deployment coords baked in
+    print(f"\nStep 5e2: Write app CLAUDE.md with live deployment facts")
+    write_app_claude_md(app_path, app_name, stack, fqdn, port,
+                        lxc_vmid, lxc_ip)
 
     # Step 5f: Declare infra in scottylab (cert apex, nginx vhost, scottycore-apps, inventory)
     if not skip_infra:
