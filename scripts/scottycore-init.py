@@ -746,17 +746,23 @@ def _unifi_login(u: dict) -> tuple[dict, dict] | None:
         data=payload,
         headers={"Content-Type": "application/json"},
     )
+    csrf = ""
     try:
         with opener.open(req, timeout=15) as resp:
             if resp.status != 200:
                 print(f"  UniFi login HTTP {resp.status}")
                 return None
+            # UniFi OS returns the CSRF token we must send on write calls
+            # via the `X-CSRF-Token` (or `X-Updated-CSRF-Token`) response
+            # header. The TOKEN cookie is JWT-only and not directly usable.
+            csrf = (resp.headers.get("X-CSRF-Token")
+                    or resp.headers.get("X-Updated-CSRF-Token")
+                    or "")
     except Exception as e:
         print(f"  UniFi login failed: {e}")
         return None
 
     cookies = {c.name: c.value for c in jar}
-    csrf = cookies.get("csrf_token") or cookies.get("TOKEN") or ""
     headers = {"X-CSRF-Token": csrf} if csrf else {}
     return (cookies, headers), opener  # type: ignore[return-value]
 
@@ -857,6 +863,119 @@ def ensure_unifi_dns(fqdn: str, a_value: str,
 
     upsert("A", a_value)
     upsert("AAAA", aaaa_value)
+    return True
+
+
+def _nginx_cert_zones() -> list[str]:
+    """Collect every DNS zone served by nginx, as derived from nginx-certs.yml.
+
+    Source of truth: each `- apex: X` gives zone X. Each `*.<zone>` in
+    `extra_sans` gives zone <zone>. A bare `<zone>` SAN is treated as
+    a zone too (so e.g. scott-o-mation.com gets its own *.wildcard).
+    De-duplicated, order preserved.
+    """
+    if not _scottylab_available():
+        return []
+    certs_yml = SCOTTYLAB_WORKLOADS / "nginx-certs.yml"
+    if not certs_yml.exists():
+        return []
+    try:
+        import yaml
+    except ImportError:
+        print(f"  PyYAML not installed — can't read nginx-certs.yml")
+        return []
+    with open(certs_yml) as f:
+        cfg = yaml.safe_load(f)
+
+    zones: list[str] = []
+    seen: set[str] = set()
+
+    def add(z: str) -> None:
+        z = z.strip()
+        if z and z not in seen:
+            seen.add(z)
+            zones.append(z)
+
+    # The file is a playbook: cfg is a list of plays; find the play with vars
+    plays = cfg if isinstance(cfg, list) else [cfg]
+    for play in plays:
+        certs = ((play or {}).get("vars") or {}).get("nginx_certs") or []
+        for entry in certs:
+            if not isinstance(entry, dict):
+                continue
+            apex = entry.get("apex")
+            if apex:
+                add(apex)
+            for san in (entry.get("extra_sans") or []):
+                san = str(san).strip()
+                if san.startswith("*."):
+                    add(san[2:])
+                else:
+                    add(san)
+    return zones
+
+
+def sync_unifi_wildcards() -> bool:
+    """Ensure every zone served by nginx has `*.<zone>` A+AAAA records in
+    UniFi. Purely declarative from `nginx-certs.yml` — rerun-safe, and
+    heals anything deleted out-of-band.
+    """
+    u = _load_unifi_creds()
+    if u is None:
+        return False
+    zones = _nginx_cert_zones()
+    if not zones:
+        print(f"  no zones found in nginx-certs.yml — nothing to sync")
+        return False
+
+    auth = _unifi_login(u)
+    if auth is None:
+        return False
+    (_cookies, headers), opener = auth
+    site = u.get("site", "default")
+    path = UNIFI_STATIC_DNS_PATH.format(site=site)
+
+    records = _unifi_request(u, opener, "GET", path, headers)
+    if records is None:
+        return False
+
+    created = updated = unchanged = 0
+
+    def upsert_wildcard(zone: str, rec_type: str, value: str) -> None:
+        nonlocal created, updated, unchanged
+        key = f"*.{zone}"
+        existing = [r for r in records
+                    if r.get("key") == key and r.get("record_type") == rec_type]
+        if existing:
+            cur = existing[0]
+            if cur.get("value") == value and cur.get("enabled", True):
+                unchanged += 1
+                return
+            body = {**cur, "value": value, "enabled": True}
+            r = _unifi_request(u, opener, "PUT", f"{path}/{cur['_id']}",
+                               headers, body)
+            if r is not None:
+                print(f"  UniFi: updated {key} {rec_type} = {value}")
+                updated += 1
+            return
+        body = {
+            "key": key,
+            "record_type": rec_type,
+            "value": value,
+            "enabled": True,
+            "ttl": 0, "port": 0, "priority": 0, "weight": 0,
+        }
+        r = _unifi_request(u, opener, "POST", path, headers, body)
+        if r is not None:
+            print(f"  UniFi: created {key} {rec_type} = {value}")
+            created += 1
+
+    for zone in zones:
+        upsert_wildcard(zone, "A", NGINX_HOST)
+        upsert_wildcard(zone, "AAAA", UNIFI_DEFAULT_AAAA)
+
+    print(f"  UniFi wildcard sync: {len(zones)} zones, "
+          f"{created} created, {updated} updated, {unchanged} unchanged")
     return True
 
 
@@ -1696,6 +1815,13 @@ def main():
         print(f"\nStep 5g2: UniFi gateway DNS for {fqdn}")
         ensure_unifi_dns(fqdn, a_value=NGINX_HOST)
 
+    # Step 5g3: Reconcile UniFi wildcards against nginx-certs.yml — every zone
+    # nginx serves should have a matching *.<zone> A+AAAA pair on the gateway.
+    # Declarative: deletions on the gateway get healed on any re-run.
+    if not skip_infra:
+        print(f"\nStep 5g3: UniFi wildcard sync (zones from nginx-certs.yml)")
+        sync_unifi_wildcards()
+
 
     # Step 6: Commit + push app changes
     print(f"\nStep 6: Commit and push app changes")
@@ -1742,6 +1868,7 @@ def main():
         print(f"  - scottylab: {app_name} added to scottycore-apps.yml deploy list")
         print(f"  - Cloudflare: {fqdn} CNAME -> melbourne tunnel + ingress rule")
         print(f"  - UniFi: {fqdn} A/AAAA (or wildcard coverage confirmed)")
+        print(f"  - UniFi: wildcard *.<zone> A+AAAA for every nginx-certs zone")
         print(f"  - Ansible: docker installed, cert issued, container deployed, vhost published")
     print(f"  - All changes committed and pushed")
     print(f"\n  Verify:  curl -sSf https://{fqdn}/health")
