@@ -691,6 +691,175 @@ def add_scottycore_app(app_name: str, target_host: str, port: int,
     return True
 
 
+# ── UniFi DNS (gateway-local DNS) ──────────────────────────────────────────
+
+UNIFI_SECRETS_PATH = SCOTTYLAB_DIR / "automation/ansible/secrets/unifi.yml"
+UNIFI_STATIC_DNS_PATH = "/proxy/network/v2/api/site/{site}/static-dns"
+UNIFI_DEFAULT_AAAA = "::dead:beef"  # sentinel used for all IPv6 placeholders
+
+
+def _load_unifi_creds() -> dict | None:
+    """Read and validate secrets/unifi.yml. Returns None if missing or
+    still carrying the placeholder password — lets the caller skip
+    gracefully rather than fail the whole onboarding.
+    """
+    if not UNIFI_SECRETS_PATH.exists():
+        return None
+    try:
+        import yaml  # lazy import — avoid hard dep if caller skips unifi
+    except ImportError:
+        print(f"  PyYAML not installed — can't read unifi.yml")
+        return None
+    try:
+        with open(UNIFI_SECRETS_PATH) as f:
+            cfg = yaml.safe_load(f)
+    except Exception as e:
+        print(f"  failed to parse unifi.yml: {e}")
+        return None
+    u = (cfg or {}).get("unifi") or {}
+    if not u.get("password") or "<" in str(u.get("password")):
+        print(f"  unifi.yml password still has a placeholder — skipping UniFi DNS")
+        return None
+    return u
+
+
+def _unifi_login(u: dict) -> tuple[dict, dict] | None:
+    """Log in to UniFi OS. Returns (cookies_dict, headers_dict) or None."""
+    import http.cookiejar
+    import ssl
+    ctx = ssl.create_default_context()
+    if not u.get("verify_ssl", False):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx),
+        urllib.request.HTTPCookieProcessor(jar),
+    )
+    payload = json.dumps({
+        "username": u["username"],
+        "password": u["password"],
+    }).encode()
+    req = urllib.request.Request(
+        f"{u['base_url']}/api/auth/login",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with opener.open(req, timeout=15) as resp:
+            if resp.status != 200:
+                print(f"  UniFi login HTTP {resp.status}")
+                return None
+    except Exception as e:
+        print(f"  UniFi login failed: {e}")
+        return None
+
+    cookies = {c.name: c.value for c in jar}
+    csrf = cookies.get("csrf_token") or cookies.get("TOKEN") or ""
+    headers = {"X-CSRF-Token": csrf} if csrf else {}
+    return (cookies, headers), opener  # type: ignore[return-value]
+
+
+def _unifi_request(u: dict, opener, method: str, path: str,
+                   headers: dict, body: dict | None = None) -> dict | list | None:
+    url = f"{u['base_url']}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Content-Type": "application/json",
+        **headers,
+    })
+    try:
+        with opener.open(req, timeout=15) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        print(f"  UniFi {method} {path} -> HTTP {e.code}: {e.read().decode()[:200]}")
+        return None
+    except Exception as e:
+        print(f"  UniFi {method} {path} failed: {e}")
+        return None
+
+
+def _wildcard_covers(records: list, fqdn: str, rec_type: str, value: str) -> bool:
+    """True iff a pre-existing `*.<parent>` record with the same type+value
+    already resolves `fqdn`. We match any proper-parent wildcard: for
+    `a.b.c.d.com`, we check `*.b.c.d.com`, `*.c.d.com`, `*.d.com`.
+    """
+    parts = fqdn.split(".")
+    for i in range(1, len(parts) - 1):  # leave at least one dot in the parent
+        wildcard = "*." + ".".join(parts[i:])
+        for r in records:
+            if (r.get("key") == wildcard
+                    and r.get("record_type") == rec_type
+                    and r.get("value") == value
+                    and r.get("enabled", True)):
+                return True
+    return False
+
+
+def ensure_unifi_dns(fqdn: str, a_value: str,
+                     aaaa_value: str = UNIFI_DEFAULT_AAAA) -> bool:
+    """Upsert A + AAAA records for `fqdn` on the local UniFi gateway.
+
+    Stateful: for each record type, fetch existing records first and
+      - no-op if a parent wildcard with the same value already covers fqdn
+        (matches the existing `*.<apex>` pattern)
+      - no-op if a specific record with the right value already exists
+      - update if a specific record exists with a wrong value
+      - create otherwise
+    """
+    u = _load_unifi_creds()
+    if u is None:
+        return False
+
+    auth = _unifi_login(u)
+    if auth is None:
+        return False
+    (_cookies, headers), opener = auth
+    site = u.get("site", "default")
+    path = UNIFI_STATIC_DNS_PATH.format(site=site)
+
+    records = _unifi_request(u, opener, "GET", path, headers)
+    if records is None:
+        return False
+
+    def upsert(rec_type: str, value: str) -> None:
+        if _wildcard_covers(records, fqdn, rec_type, value):
+            print(f"  UniFi: {fqdn} {rec_type} covered by existing wildcard ({value})")
+            return
+        existing = [r for r in records
+                    if r.get("key") == fqdn and r.get("record_type") == rec_type]
+        if existing:
+            cur = existing[0]
+            if cur.get("value") == value and cur.get("enabled", True):
+                print(f"  UniFi: {fqdn} {rec_type} already = {value}")
+                return
+            body = {**cur, "value": value, "enabled": True}
+            r = _unifi_request(u, opener, "PUT", f"{path}/{cur['_id']}",
+                               headers, body)
+            if r is not None:
+                print(f"  UniFi: updated {fqdn} {rec_type} = {value}")
+            return
+        body = {
+            "key": fqdn,
+            "record_type": rec_type,
+            "value": value,
+            "enabled": True,
+            "ttl": 0,
+            "port": 0,
+            "priority": 0,
+            "weight": 0,
+        }
+        r = _unifi_request(u, opener, "POST", path, headers, body)
+        if r is not None:
+            print(f"  UniFi: created {fqdn} {rec_type} = {value}")
+
+    upsert("A", a_value)
+    upsert("AAAA", aaaa_value)
+    return True
+
+
 def register_in_inventory(app_name: str, target_host: str, ip: str,
                           vmid: int, note: str) -> bool:
     """Append <target_host> entry under docker_melbourne in workloads.yml."""
@@ -1520,6 +1689,13 @@ def main():
         ensure_cf_cname(fqdn, apex)
         ensure_tunnel_ingress(fqdn)
 
+    # Step 5g2: UniFi local DNS — point LAN clients straight at nginx for fqdn.
+    # Skipped silently if secrets/unifi.yml is missing or still a placeholder.
+    # Stateful: no-op if an existing *.<parent> wildcard already covers fqdn.
+    if not skip_infra:
+        print(f"\nStep 5g2: UniFi gateway DNS for {fqdn}")
+        ensure_unifi_dns(fqdn, a_value=NGINX_HOST)
+
 
     # Step 6: Commit + push app changes
     print(f"\nStep 6: Commit and push app changes")
@@ -1565,6 +1741,7 @@ def main():
         print(f"  - scottylab: {fqdn} -> http://{lxc_ip or app_name + '.melbourne'}:{port} in nginx-vhosts.yml")
         print(f"  - scottylab: {app_name} added to scottycore-apps.yml deploy list")
         print(f"  - Cloudflare: {fqdn} CNAME -> melbourne tunnel + ingress rule")
+        print(f"  - UniFi: {fqdn} A/AAAA (or wildcard coverage confirmed)")
         print(f"  - Ansible: docker installed, cert issued, container deployed, vhost published")
     print(f"  - All changes committed and pushed")
     print(f"\n  Verify:  curl -sSf https://{fqdn}/health")
