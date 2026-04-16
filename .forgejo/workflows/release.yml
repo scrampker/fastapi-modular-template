@@ -23,6 +23,7 @@ env:
     scottomation
     scottybiz
     scottysync
+    scottylab-app
 
 jobs:
   release:

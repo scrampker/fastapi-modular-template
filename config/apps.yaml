@@ -58,3 +58,10 @@ scottysync:
   branch: master
   port: 8443
   fqdn: scottysync.scotty.consulting
+
+scottylab-app:
+  path: /script/scottylab-app
+  stack: FastAPI (Scotty homelab management)
+  branch: master
+  port: 8102
+  fqdn: scottylab.scotty.consulting
