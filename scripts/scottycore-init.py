@@ -45,9 +45,22 @@ from pathlib import Path
 CORE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CORE_DIR / "scripts"))
 
-from config_loader import CONFIG_FILE, load_apps_config
+# Toolkit — generic infrastructure primitives extracted to scottylab.
+# No pip install; we add automation/ to sys.path and import as scottylab_toolkit.
+sys.path.insert(0, "/script/scottylab/automation")
 
-# ── Infrastructure constants ──────────────────────────────────────────────────
+from config_loader import CONFIG_FILE, load_apps_config
+from scottylab_toolkit import (
+    ansible_run, cloudflare, inventory as sl_inventory, lxc, nginx as sl_nginx,
+    unifi,
+)
+from scottylab_toolkit.paths import (
+    NGINX_HOST, PROXMOX_NODE_NAME,
+    SCOTTYLAB_DIR, SCOTTYLAB_WORKLOADS,
+)
+from scottylab_toolkit.yaml_inserts import append_to_yaml_list
+
+# ── ScottyCore-specific constants ────────────────────────────────────────────
 
 FORGEJO_BASE = "https://forgejo.scotty.consulting"
 FORGEJO_USER = "scotty"
@@ -55,258 +68,10 @@ FORGEJO_TOKEN_PATH = Path.home() / ".config" / "forgejo-token"
 
 GITHUB_USER = "scrampker"
 
-# Infra/deployment defaults
-SCOTTYLAB_DIR = Path("/script/scottylab")
-SCOTTYLAB_WORKLOADS = SCOTTYLAB_DIR / "automation/ansible/playbooks/workloads"
 PORT_BASE = 8100  # first scottybiz-era port; scan apps.yaml for next free
 
 # Default cert apex for new Scotty apps. Override with --domain <fqdn>.
 DEFAULT_DOMAIN_APEX = "corpaholics.com"
-
-# Cloudflare + Melbourne tunnel (used to publish apps externally)
-CF_API = "https://api.cloudflare.com/client/v4"
-CF_TUNNEL_ID = "1feb72d4-9b3c-4159-a668-e552a96846c8"  # melbourne
-CF_TUNNEL_HOSTNAME = f"{CF_TUNNEL_ID}.cfargotunnel.com"
-NGINX_HOST = "192.168.151.10"  # cloudflared + nginx reverse proxy
-
-# The CF DNS-01 token on the nginx LXC doubles as a Zone:DNS:Edit token.
-# Readable only by SSH'ing to the nginx host (root).
-CF_TOKEN_REMOTE_PATH = "/etc/letsencrypt/cloudflare.ini"
-
-# Proxmox provisioning defaults. Override via flags when adopting a different
-# template, storage pool, or target node.
-PROXMOX_NODE_IP = "192.168.150.101"   # proxmox1.melbourne
-PROXMOX_NODE_NAME = "proxmox1"
-PCT_TEMPLATE = "local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
-PCT_STORAGE = "rbd_nvme_storage"
-PCT_DISK_GB = 16
-PCT_CORES = 2
-PCT_MEMORY_MB = 2048
-PCT_BRIDGE = "vmbr0"
-PCT_VLAN = 150
-
-
-def _ssh_run(host: str, cmd: str, timeout: int = 30) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, cmd],
-        capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def provision_lxc(app_name: str) -> tuple[int, str] | None:
-    """Create an unprivileged Docker-capable LXC on proxmox1 and wait for
-    an IPv4 address. Returns (vmid, ip) on success, None on failure.
-
-    Idempotent: if a CT with `hostname == app_name` already exists on the
-    node, returns that CT's (vmid, ip) without recreating it.
-    """
-    # Check for existing CT with this hostname. `pct list` has columns
-    # VMID STATUS LOCK NAME — the NAME column is the hostname.
-    find = _ssh_run(
-        PROXMOX_NODE_IP,
-        f"pct list | awk -v h={app_name} '$NF==h {{print $1}}'",
-    )
-    existing_vmid = find.stdout.strip().splitlines()[0] if find.stdout.strip() else ""
-    if existing_vmid.isdigit():
-        ip_r = _ssh_run(
-            PROXMOX_NODE_IP,
-            f"pct exec {existing_vmid} -- ip -4 -o addr show eth0 2>/dev/null "
-            f"| awk '{{print $4}}' | cut -d/ -f1 | head -1",
-        )
-        ip = ip_r.stdout.strip()
-        print(f"  LXC for {app_name} already exists (CT {existing_vmid}, IP {ip})")
-        return (int(existing_vmid), ip)
-
-    create_cmd = (
-        f"set -e; "
-        f"VMID=$(pvesh get /cluster/nextid); "
-        f"pct create $VMID {PCT_TEMPLATE} "
-        f"  --hostname {app_name} "
-        f"  --unprivileged 1 --features nesting=1,keyctl=1 "
-        f"  --cores {PCT_CORES} --memory {PCT_MEMORY_MB} --swap 512 "
-        f"  --rootfs {PCT_STORAGE}:{PCT_DISK_GB} "
-        f"  --net0 name=eth0,bridge={PCT_BRIDGE},ip=dhcp,tag={PCT_VLAN} "
-        f"  --onboot 1 "
-        f"  --ssh-public-keys /root/.ssh/authorized_keys "
-        f"  --start 1 >/dev/null; "
-        f"echo VMID=$VMID"
-    )
-    r = _ssh_run(PROXMOX_NODE_IP, create_cmd, timeout=180)
-    if r.returncode != 0:
-        print(f"  pct create failed: {r.stderr.strip()[:300]}")
-        return None
-
-    vmid_line = next((ln for ln in r.stdout.splitlines() if ln.startswith("VMID=")), "")
-    if not vmid_line:
-        print(f"  pct create: could not parse VMID from output")
-        return None
-    vmid = int(vmid_line.split("=", 1)[1])
-
-    # Poll for IP — DHCP usually settles within 10s
-    import time
-    ip = ""
-    for _ in range(30):
-        time.sleep(1)
-        ip_r = _ssh_run(
-            PROXMOX_NODE_IP,
-            f"pct exec {vmid} -- ip -4 -o addr show eth0 2>/dev/null "
-            f"| awk '{{print $4}}' | cut -d/ -f1 | head -1",
-        )
-        ip = ip_r.stdout.strip()
-        if ip and ip != "":
-            break
-    if not ip:
-        print(f"  CT {vmid} created but DHCP IP not seen after 30s")
-        return None
-
-    print(f"  Provisioned LXC: CT {vmid}, IP {ip}")
-    return (vmid, ip)
-
-
-def _ssh_read(host: str, path: str) -> str | None:
-    r = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", host,
-         f"cat {path}"],
-        capture_output=True, text=True, timeout=15,
-    )
-    return r.stdout if r.returncode == 0 else None
-
-
-def _cf_token() -> str | None:
-    """Read the Cloudflare API token from the nginx LXC's certbot config."""
-    body = _ssh_read(NGINX_HOST, CF_TOKEN_REMOTE_PATH)
-    if not body:
-        return None
-    for line in body.splitlines():
-        if "dns_cloudflare_api_token" in line:
-            return line.split("=", 1)[1].strip()
-    return None
-
-
-def _cf_zone_id(token: str, apex: str) -> str | None:
-    req = urllib.request.Request(
-        f"{CF_API}/zones?name={apex}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-            results = data.get("result", [])
-            return results[0]["id"] if results else None
-    except Exception as e:
-        print(f"  CF zone lookup failed: {e}")
-        return None
-
-
-def ensure_cf_cname(fqdn: str, apex: str) -> bool:
-    """Create a CNAME <fqdn> -> <tunnel>.cfargotunnel.com on Cloudflare
-    (proxied). Idempotent: no-op if an identical record already exists.
-    """
-    token = _cf_token()
-    if not token:
-        print(f"  No Cloudflare token available — skipping DNS")
-        return False
-    zone_id = _cf_zone_id(token, apex)
-    if not zone_id:
-        print(f"  Cloudflare zone '{apex}' not found — skipping DNS")
-        return False
-
-    name = fqdn.removesuffix(f".{apex}") if fqdn != apex else "@"
-    # Probe existing record
-    probe = urllib.request.Request(
-        f"{CF_API}/zones/{zone_id}/dns_records?type=CNAME&name={fqdn}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    try:
-        with urllib.request.urlopen(probe, timeout=15) as resp:
-            existing = json.loads(resp.read()).get("result", [])
-    except Exception as e:
-        print(f"  CF DNS probe failed: {e}")
-        return False
-
-    if existing and existing[0].get("content") == CF_TUNNEL_HOSTNAME:
-        print(f"  CF CNAME {fqdn} already points to tunnel")
-        return True
-
-    payload = json.dumps({
-        "type": "CNAME",
-        "name": name,
-        "content": CF_TUNNEL_HOSTNAME,
-        "proxied": True,
-        "comment": "scottycore app — managed by scottycore-init.py",
-    }).encode()
-    method = "PUT" if existing else "POST"
-    url = (f"{CF_API}/zones/{zone_id}/dns_records/{existing[0]['id']}"
-           if existing else
-           f"{CF_API}/zones/{zone_id}/dns_records")
-    req = urllib.request.Request(
-        url, data=payload, method=method,
-        headers={"Authorization": f"Bearer {token}",
-                 "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        if data.get("success"):
-            print(f"  CF CNAME {fqdn} -> {CF_TUNNEL_HOSTNAME} ({method})")
-            return True
-        print(f"  CF DNS error: {data.get('errors')}")
-        return False
-    except urllib.error.HTTPError as e:
-        print(f"  CF DNS HTTP {e.code}: {e.read().decode()[:200]}")
-        return False
-
-
-def ensure_tunnel_ingress(fqdn: str) -> bool:
-    """Add a tunnel ingress rule for <fqdn> -> nginx on the melbourne
-    cloudflared config. SSH-edits /etc/cloudflared/config.yml on nginx
-    host; idempotent — no-op if the hostname rule is already present.
-    Restarts cloudflared after a change.
-    """
-    # Idempotency probe
-    check = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", NGINX_HOST,
-         f"grep -q 'hostname: {fqdn}' /etc/cloudflared/config.yml && echo present"],
-        capture_output=True, text=True, timeout=15,
-    )
-    if "present" in check.stdout:
-        print(f"  tunnel ingress for {fqdn} already present")
-        return True
-
-    # Insert the new rule before the terminal `- service: http_status:404` line.
-    # Using a heredoc on the remote side keeps the script tiny and avoids
-    # quoting foot-guns around YAML whitespace.
-    remote_cmd = f"""
-set -e
-CONF=/etc/cloudflared/config.yml
-cp $CONF $CONF.bak.$(date +%s)
-python3 - <<'PY'
-import re
-conf = open('/etc/cloudflared/config.yml').read()
-rule = '''  - hostname: {fqdn}
-    service: http://localhost:80
-    originRequest:
-      httpHostHeader: {fqdn}
-'''
-# Insert before the terminal catch-all 404 rule
-pattern = r'(\\n)(\\s*- service:\\s*http_status:404\\s*\\n)'
-new = re.sub(pattern, r'\\1' + rule + r'\\2', conf, count=1)
-if new == conf:
-    raise SystemExit('catch-all rule not found — cannot insert')
-open('/etc/cloudflared/config.yml', 'w').write(new)
-PY
-cloudflared tunnel --config $CONF ingress validate >/dev/null
-systemctl restart cloudflared
-"""
-    r = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", NGINX_HOST, remote_cmd],
-        capture_output=True, text=True, timeout=30,
-    )
-    if r.returncode != 0:
-        print(f"  tunnel ingress update failed: {r.stderr.strip()[:300]}")
-        return False
-    print(f"  tunnel ingress for {fqdn} added; cloudflared restarted")
-    return True
 
 
 # ── Step 1: Forgejo repo + dual-remote ───────────────────────────────────────
@@ -545,128 +310,12 @@ def install_docker_compose(app_path: Path, app_name: str, port: int) -> bool:
 # ── scottylab infra declarations (nginx cert + vhost + scottycore-apps) ─────
 
 
-def _scottylab_available() -> bool:
-    if not SCOTTYLAB_WORKLOADS.exists():
-        print(f"  scottylab not found at {SCOTTYLAB_DIR} — skipping infra edits")
-        return False
-    return True
-
-
-def _append_to_yaml_list(path: Path, list_key: str, entry_lines: list[str]) -> bool:
-    """Append entry_lines to a YAML list named `list_key` in the given file.
-
-    Locates the `<indent><list_key>:` line, then walks forward accepting only
-    lines whose indent > list_key indent (i.e. list body), stopping at the
-    first line that dedents back to <= list_key indent. Inserts the new
-    entry immediately before that exit point.
-
-    entry_lines should be written at the same indent as existing list items
-    (typically list_key_indent + 2). The caller supplies properly indented
-    strings without a trailing newline — this helper joins them.
-    """
-    lines = path.read_text().splitlines(keepends=True)
-    key_idx = None
-    key_indent = 0
-    for i, ln in enumerate(lines):
-        m = re.match(rf"^(\s*){re.escape(list_key)}:\s*$", ln)
-        if m:
-            key_idx = i
-            key_indent = len(m.group(1))
-            break
-    if key_idx is None:
-        # Handle inline empty list form: `<indent><list_key>: []`
-        for i, ln in enumerate(lines):
-            m = re.match(rf"^(\s*){re.escape(list_key)}:\s*\[\]\s*$", ln)
-            if m:
-                indent = m.group(1)
-                replacement = f"{indent}{list_key}:\n"
-                for el in entry_lines:
-                    replacement += el if el.endswith("\n") else el + "\n"
-                lines[i] = replacement
-                path.write_text("".join(lines))
-                return True
-        return False
-
-    # Scan forward through the list body
-    exit_idx = len(lines)
-    for j in range(key_idx + 1, len(lines)):
-        ln = lines[j]
-        if ln.strip() == "":
-            continue
-        leading = len(ln) - len(ln.lstrip(" "))
-        if leading <= key_indent:
-            exit_idx = j
-            break
-
-    # Insert entry just before exit (and before any trailing blank line that
-    # separates the vars block from the next section, to keep formatting).
-    insert_at = exit_idx
-    while insert_at > key_idx + 1 and lines[insert_at - 1].strip() == "":
-        insert_at -= 1
-
-    snippet = "".join(el if el.endswith("\n") else el + "\n" for el in entry_lines)
-    lines.insert(insert_at, snippet)
-    path.write_text("".join(lines))
-    return True
-
-
-def add_nginx_cert_apex(apex: str) -> bool:
-    """Append a new apex to nginx-certs.yml if not already present.
-    Declarative only — no cert is issued until ansible-playbook runs.
-    """
-    if not _scottylab_available():
-        return False
-    certs_yml = SCOTTYLAB_WORKLOADS / "nginx-certs.yml"
-    if not certs_yml.exists():
-        print(f"  nginx-certs.yml not found")
-        return False
-
-    text = certs_yml.read_text()
-    if re.search(rf"^\s*-\s*apex:\s*{re.escape(apex)}\s*$", text, re.M):
-        print(f"  {apex} already in nginx-certs.yml")
-        return False
-
-    if _append_to_yaml_list(certs_yml, "nginx_certs", [f"      - apex: {apex}"]):
-        print(f"  Added apex '{apex}' to nginx-certs.yml")
-        return True
-    print(f"  Could not locate nginx_certs: block")
-    return False
-
-
-def add_nginx_vhost(app_name: str, fqdn: str, apex: str,
-                    upstream_host_or_ip: str, port: int) -> bool:
-    """Append a vhost entry to nginx-vhosts.yml."""
-    if not _scottylab_available():
-        return False
-    vhosts_yml = SCOTTYLAB_WORKLOADS / "nginx-vhosts.yml"
-    if not vhosts_yml.exists():
-        print(f"  nginx-vhosts.yml not found")
-        return False
-
-    text = vhosts_yml.read_text()
-    if re.search(rf"^\s*-\s*name:\s*{re.escape(app_name)}\s*$", text, re.M):
-        print(f"  vhost '{app_name}' already in nginx-vhosts.yml")
-        return False
-
-    entry_lines = [
-        "",
-        f"      - name: {app_name}",
-        f"        server_name: {fqdn}",
-        f"        cert: {apex}",
-        f"        upstream: http://{upstream_host_or_ip}:{port}",
-    ]
-    if _append_to_yaml_list(vhosts_yml, "nginx_vhosts", entry_lines):
-        print(f"  Added vhost '{app_name}' -> {fqdn} -> http://{upstream_host_or_ip}:{port}")
-        return True
-    print(f"  Could not locate nginx_vhosts: block")
-    return False
-
-
 def add_scottycore_app(app_name: str, target_host: str, port: int,
                        repo_url: str, branch: str) -> bool:
-    """Append an entry to scottycore-apps.yml."""
-    if not _scottylab_available():
-        return False
+    """Append an entry to scottycore-apps.yml (scottycore-specific — kept here
+    because scottycore-apps.yml is how the deploy playbook finds apps).
+    Uses the toolkit's indent-aware YAML appender for the actual insert.
+    """
     apps_yml = SCOTTYLAB_WORKLOADS / "scottycore-apps.yml"
     if not apps_yml.exists():
         print(f"  scottycore-apps.yml not found (expected template to be checked in)")
@@ -684,424 +333,18 @@ def add_scottycore_app(app_name: str, target_host: str, port: int,
         f"        repo: {repo_url}",
         f"        branch: {branch}",
     ]
-    if not _append_to_yaml_list(apps_yml, "scottycore_apps", entry_lines):
+    if not append_to_yaml_list(apps_yml, "scottycore_apps", entry_lines):
         print(f"  Could not locate scottycore_apps: block")
         return False
     print(f"  Added scottycore-apps entry '{app_name}' -> {target_host}")
     return True
 
 
-# ── UniFi DNS (gateway-local DNS) ──────────────────────────────────────────
-
-UNIFI_SECRETS_PATH = SCOTTYLAB_DIR / "automation/ansible/secrets/unifi.yml"
-UNIFI_STATIC_DNS_PATH = "/proxy/network/v2/api/site/{site}/static-dns"
-UNIFI_DEFAULT_AAAA = "::dead:beef"  # sentinel used for all IPv6 placeholders
-
-
-def _load_unifi_creds() -> dict | None:
-    """Read and validate secrets/unifi.yml. Returns None if missing or
-    still carrying the placeholder password — lets the caller skip
-    gracefully rather than fail the whole onboarding.
-    """
-    if not UNIFI_SECRETS_PATH.exists():
-        return None
-    try:
-        import yaml  # lazy import — avoid hard dep if caller skips unifi
-    except ImportError:
-        print(f"  PyYAML not installed — can't read unifi.yml")
-        return None
-    try:
-        with open(UNIFI_SECRETS_PATH) as f:
-            cfg = yaml.safe_load(f)
-    except Exception as e:
-        print(f"  failed to parse unifi.yml: {e}")
-        return None
-    u = (cfg or {}).get("unifi") or {}
-    if not u.get("password") or "<" in str(u.get("password")):
-        print(f"  unifi.yml password still has a placeholder — skipping UniFi DNS")
-        return None
-    return u
-
-
-def _unifi_login(u: dict) -> tuple[dict, dict] | None:
-    """Log in to UniFi OS. Returns (cookies_dict, headers_dict) or None."""
-    import http.cookiejar
-    import ssl
-    ctx = ssl.create_default_context()
-    if not u.get("verify_ssl", False):
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-    jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=ctx),
-        urllib.request.HTTPCookieProcessor(jar),
-    )
-    payload = json.dumps({
-        "username": u["username"],
-        "password": u["password"],
-    }).encode()
-    req = urllib.request.Request(
-        f"{u['base_url']}/api/auth/login",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    csrf = ""
-    try:
-        with opener.open(req, timeout=15) as resp:
-            if resp.status != 200:
-                print(f"  UniFi login HTTP {resp.status}")
-                return None
-            # UniFi OS returns the CSRF token we must send on write calls
-            # via the `X-CSRF-Token` (or `X-Updated-CSRF-Token`) response
-            # header. The TOKEN cookie is JWT-only and not directly usable.
-            csrf = (resp.headers.get("X-CSRF-Token")
-                    or resp.headers.get("X-Updated-CSRF-Token")
-                    or "")
-    except Exception as e:
-        print(f"  UniFi login failed: {e}")
-        return None
-
-    cookies = {c.name: c.value for c in jar}
-    headers = {"X-CSRF-Token": csrf} if csrf else {}
-    return (cookies, headers), opener  # type: ignore[return-value]
-
-
-def _unifi_request(u: dict, opener, method: str, path: str,
-                   headers: dict, body: dict | None = None) -> dict | list | None:
-    url = f"{u['base_url']}{path}"
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={
-        "Content-Type": "application/json",
-        **headers,
-    })
-    try:
-        with opener.open(req, timeout=15) as resp:
-            raw = resp.read()
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as e:
-        print(f"  UniFi {method} {path} -> HTTP {e.code}: {e.read().decode()[:200]}")
-        return None
-    except Exception as e:
-        print(f"  UniFi {method} {path} failed: {e}")
-        return None
-
-
-def _wildcard_covers(records: list, fqdn: str, rec_type: str, value: str) -> bool:
-    """True iff a pre-existing `*.<parent>` record with the same type+value
-    already resolves `fqdn`. We match any proper-parent wildcard: for
-    `a.b.c.d.com`, we check `*.b.c.d.com`, `*.c.d.com`, `*.d.com`.
-    """
-    parts = fqdn.split(".")
-    for i in range(1, len(parts) - 1):  # leave at least one dot in the parent
-        wildcard = "*." + ".".join(parts[i:])
-        for r in records:
-            if (r.get("key") == wildcard
-                    and r.get("record_type") == rec_type
-                    and r.get("value") == value
-                    and r.get("enabled", True)):
-                return True
-    return False
-
-
-def ensure_unifi_dns(fqdn: str, a_value: str,
-                     aaaa_value: str = UNIFI_DEFAULT_AAAA) -> bool:
-    """Upsert A + AAAA records for `fqdn` on the local UniFi gateway.
-
-    Stateful: for each record type, fetch existing records first and
-      - no-op if a parent wildcard with the same value already covers fqdn
-        (matches the existing `*.<apex>` pattern)
-      - no-op if a specific record with the right value already exists
-      - update if a specific record exists with a wrong value
-      - create otherwise
-    """
-    u = _load_unifi_creds()
-    if u is None:
-        return False
-
-    auth = _unifi_login(u)
-    if auth is None:
-        return False
-    (_cookies, headers), opener = auth
-    site = u.get("site", "default")
-    path = UNIFI_STATIC_DNS_PATH.format(site=site)
-
-    records = _unifi_request(u, opener, "GET", path, headers)
-    if records is None:
-        return False
-
-    def upsert(rec_type: str, value: str) -> None:
-        if _wildcard_covers(records, fqdn, rec_type, value):
-            print(f"  UniFi: {fqdn} {rec_type} covered by existing wildcard ({value})")
-            return
-        existing = [r for r in records
-                    if r.get("key") == fqdn and r.get("record_type") == rec_type]
-        if existing:
-            cur = existing[0]
-            if cur.get("value") == value and cur.get("enabled", True):
-                print(f"  UniFi: {fqdn} {rec_type} already = {value}")
-                return
-            body = {**cur, "value": value, "enabled": True}
-            r = _unifi_request(u, opener, "PUT", f"{path}/{cur['_id']}",
-                               headers, body)
-            if r is not None:
-                print(f"  UniFi: updated {fqdn} {rec_type} = {value}")
-            return
-        body = {
-            "key": fqdn,
-            "record_type": rec_type,
-            "value": value,
-            "enabled": True,
-            "ttl": 0,
-            "port": 0,
-            "priority": 0,
-            "weight": 0,
-        }
-        r = _unifi_request(u, opener, "POST", path, headers, body)
-        if r is not None:
-            print(f"  UniFi: created {fqdn} {rec_type} = {value}")
-
-    upsert("A", a_value)
-    upsert("AAAA", aaaa_value)
-    return True
-
-
-def _nginx_cert_zones() -> list[str]:
-    """Collect every DNS zone served by nginx, as derived from nginx-certs.yml.
-
-    Source of truth: each `- apex: X` gives zone X. Each `*.<zone>` in
-    `extra_sans` gives zone <zone>. A bare `<zone>` SAN is treated as
-    a zone too (so e.g. scott-o-mation.com gets its own *.wildcard).
-    De-duplicated, order preserved.
-    """
-    if not _scottylab_available():
-        return []
-    certs_yml = SCOTTYLAB_WORKLOADS / "nginx-certs.yml"
-    if not certs_yml.exists():
-        return []
-    try:
-        import yaml
-    except ImportError:
-        print(f"  PyYAML not installed — can't read nginx-certs.yml")
-        return []
-    with open(certs_yml) as f:
-        cfg = yaml.safe_load(f)
-
-    zones: list[str] = []
-    seen: set[str] = set()
-
-    def add(z: str) -> None:
-        z = z.strip()
-        if z and z not in seen:
-            seen.add(z)
-            zones.append(z)
-
-    # The file is a playbook: cfg is a list of plays; find the play with vars
-    plays = cfg if isinstance(cfg, list) else [cfg]
-    for play in plays:
-        certs = ((play or {}).get("vars") or {}).get("nginx_certs") or []
-        for entry in certs:
-            if not isinstance(entry, dict):
-                continue
-            apex = entry.get("apex")
-            if apex:
-                add(apex)
-            for san in (entry.get("extra_sans") or []):
-                san = str(san).strip()
-                if san.startswith("*."):
-                    add(san[2:])
-                else:
-                    add(san)
-    return zones
-
-
-def sync_unifi_wildcards() -> bool:
-    """Ensure every zone served by nginx has `*.<zone>` A+AAAA records in
-    UniFi. Purely declarative from `nginx-certs.yml` — rerun-safe, and
-    heals anything deleted out-of-band.
-    """
-    u = _load_unifi_creds()
-    if u is None:
-        return False
-    zones = _nginx_cert_zones()
-    if not zones:
-        print(f"  no zones found in nginx-certs.yml — nothing to sync")
-        return False
-
-    auth = _unifi_login(u)
-    if auth is None:
-        return False
-    (_cookies, headers), opener = auth
-    site = u.get("site", "default")
-    path = UNIFI_STATIC_DNS_PATH.format(site=site)
-
-    records = _unifi_request(u, opener, "GET", path, headers)
-    if records is None:
-        return False
-
-    created = updated = unchanged = 0
-
-    def upsert_wildcard(zone: str, rec_type: str, value: str) -> None:
-        nonlocal created, updated, unchanged
-        key = f"*.{zone}"
-        existing = [r for r in records
-                    if r.get("key") == key and r.get("record_type") == rec_type]
-        if existing:
-            cur = existing[0]
-            if cur.get("value") == value and cur.get("enabled", True):
-                unchanged += 1
-                return
-            body = {**cur, "value": value, "enabled": True}
-            r = _unifi_request(u, opener, "PUT", f"{path}/{cur['_id']}",
-                               headers, body)
-            if r is not None:
-                print(f"  UniFi: updated {key} {rec_type} = {value}")
-                updated += 1
-            return
-        body = {
-            "key": key,
-            "record_type": rec_type,
-            "value": value,
-            "enabled": True,
-            "ttl": 0, "port": 0, "priority": 0, "weight": 0,
-        }
-        r = _unifi_request(u, opener, "POST", path, headers, body)
-        if r is not None:
-            print(f"  UniFi: created {key} {rec_type} = {value}")
-            created += 1
-
-    for zone in zones:
-        upsert_wildcard(zone, "A", NGINX_HOST)
-        upsert_wildcard(zone, "AAAA", UNIFI_DEFAULT_AAAA)
-
-    print(f"  UniFi wildcard sync: {len(zones)} zones, "
-          f"{created} created, {updated} updated, {unchanged} unchanged")
-    return True
-
-
-def register_in_inventory(app_name: str, target_host: str, ip: str,
-                          vmid: int, note: str) -> bool:
-    """Append <target_host> entry under docker_melbourne in workloads.yml."""
-    if not _scottylab_available():
-        return False
-    inv = SCOTTYLAB_DIR / "automation/ansible/inventory/workloads.yml"
-    if not inv.exists():
-        print(f"  inventory/workloads.yml not found")
-        return False
-
-    text = inv.read_text()
-    if re.search(rf"^\s*{re.escape(target_host)}:\s*$", text, re.M):
-        print(f"  {target_host} already in inventory")
-        return False
-
-    # Find docker_melbourne: and its hosts: block, append a new host there.
-    m = re.search(r"(^\s*docker_melbourne:\s*\n\s*hosts:\s*\n)", text, re.M)
-    if not m:
-        print(f"  Could not locate docker_melbourne.hosts in inventory")
-        return False
-
-    lines = text.splitlines(keepends=True)
-    # Index of the line right after `hosts:` under docker_melbourne
-    start = text[: m.end(1)].count("\n")
-    # Determine the indent used for existing hosts (first non-blank line after)
-    host_indent = "            "
-    for i in range(start, len(lines)):
-        ln = lines[i]
-        if ln.strip() == "":
-            continue
-        leading = len(ln) - len(ln.lstrip(" "))
-        # existing hosts sit at a deeper indent than `hosts:`
-        if leading > 0:
-            host_indent = " " * leading
-        break
-
-    # Walk forward to the end of docker_melbourne.hosts block (first dedent)
-    insert_at = len(lines)
-    host_indent_len = len(host_indent)
-    for i in range(start, len(lines)):
-        ln = lines[i]
-        if ln.strip() == "":
-            continue
-        leading = len(ln) - len(ln.lstrip(" "))
-        if leading < host_indent_len:
-            insert_at = i
-            break
-    while insert_at > start and lines[insert_at - 1].strip() == "":
-        insert_at -= 1
-
-    child = host_indent + "  "
-    entry = (
-        f"{host_indent}{target_host}:\n"
-        f"{child}ansible_host: {ip}\n"
-        f"{child}proxmox_host: {PROXMOX_NODE_NAME}\n"
-        f"{child}vmid: {vmid}\n"
-        f"{child}note: \"{note}\"\n"
-    )
-    lines.insert(insert_at, entry)
-    inv.write_text("".join(lines))
-    print(f"  Registered {target_host} -> {ip} in inventory")
-    return True
-
-
-# ── Ansible runners (end-to-end: install docker, deploy, publish) ───────────
-
-
-ANSIBLE_DIR = SCOTTYLAB_DIR / "automation/ansible"
-
-
-def _ansible_run(playbook: str, *, limit: str | None = None,
-                 extra_vars: dict | None = None) -> bool:
-    cmd = [
-        "ansible-playbook",
-        "-i", "inventory/hosts.yml",
-        "-i", "inventory/workloads.yml",
-        f"playbooks/workloads/{playbook}",
-    ]
-    if limit:
-        cmd += ["-l", limit]
-    if extra_vars:
-        for k, v in extra_vars.items():
-            cmd += ["-e", f"{k}={v}"]
-    r = subprocess.run(cmd, cwd=str(ANSIBLE_DIR),
-                       capture_output=True, text=True, timeout=600)
-    if r.returncode != 0:
-        tail = (r.stdout + r.stderr).splitlines()[-20:]
-        print(f"  ansible {playbook} FAILED:")
-        for ln in tail:
-            print(f"    {ln}")
-        return False
-    # Parse recap line for brevity
-    recap = [ln for ln in r.stdout.splitlines()
-             if re.search(r"\s:\s+ok=\d+", ln)]
-    for ln in recap:
-        print(f"  {ln.strip()}")
-    return True
-
-
-def install_docker_on(host: str) -> bool:
-    print(f"  installing Docker on {host}...")
-    return _ansible_run("docker.yml", limit=host, extra_vars={"target_hosts": "all"})
-
-
-def issue_certs() -> bool:
-    print(f"  issuing/expanding Let's Encrypt certs...")
-    return _ansible_run("nginx-certs.yml")
-
-
-def deploy_scottycore_app(host: str) -> bool:
-    print(f"  deploying scottycore app on {host}...")
-    return _ansible_run("scottycore-apps.yml", limit=host,
-                        extra_vars={"target_hosts": "all"})
-
-
-def publish_vhost() -> bool:
-    print(f"  publishing nginx vhost...")
-    return _ansible_run("nginx-vhosts.yml")
-
 
 def commit_scottylab_changes(app_name: str) -> bool:
     """Commit + push scottylab infra declarations."""
-    if not _scottylab_available():
+    if not SCOTTYLAB_DIR.exists():
+        print(f"  scottylab not found at {SCOTTYLAB_DIR} — skipping commit")
         return False
 
     def git(*args: str) -> subprocess.CompletedProcess:
@@ -1113,7 +356,8 @@ def commit_scottylab_changes(app_name: str) -> bool:
     git("add",
         "automation/ansible/playbooks/workloads/nginx-certs.yml",
         "automation/ansible/playbooks/workloads/nginx-vhosts.yml",
-        "automation/ansible/playbooks/workloads/scottycore-apps.yml")
+        "automation/ansible/playbooks/workloads/scottycore-apps.yml",
+        "automation/ansible/inventory/workloads.yml")
 
     status = git("diff", "--cached", "--stat")
     if not status.stdout.strip():
@@ -1784,7 +1028,7 @@ def main():
     lxc_vmid = None
     if not skip_infra:
         print(f"\nStep 5e: Provision LXC on {PROXMOX_NODE_NAME}")
-        prov = provision_lxc(app_name)
+        prov = lxc.provision(app_name)
         if prov:
             lxc_vmid, lxc_ip = prov
 
@@ -1794,33 +1038,35 @@ def main():
         target_host = f"{app_name}.melbourne"
         repo_url = f"{FORGEJO_BASE}/{FORGEJO_USER}/{app_name}.git"
         upstream = lxc_ip or target_host  # real IP if we have it; else placeholder
-        add_nginx_cert_apex(apex)
-        add_nginx_vhost(app_name, fqdn, apex, upstream, port)
+        sl_nginx.add_cert_apex(apex)
+        sl_nginx.add_vhost(app_name, fqdn, apex, upstream, port)
         add_scottycore_app(app_name, target_host, port, repo_url, branch)
         if lxc_ip and lxc_vmid is not None:
-            register_in_inventory(app_name, target_host, lxc_ip, lxc_vmid,
+            sl_inventory.register(target_host, lxc_ip, lxc_vmid,
                                   note=f"scottycore app — {stack}")
         commit_scottylab_changes(app_name)
 
     # Step 5g: Publish via Cloudflare (DNS CNAME + tunnel ingress)
     if not skip_infra:
         print(f"\nStep 5g: Publish {fqdn} via Cloudflare tunnel")
-        ensure_cf_cname(fqdn, apex)
-        ensure_tunnel_ingress(fqdn)
+        cloudflare.ensure_cname(fqdn, apex)
+        cloudflare.ensure_tunnel_ingress(fqdn)
 
     # Step 5g2: UniFi local DNS — point LAN clients straight at nginx for fqdn.
     # Skipped silently if secrets/unifi.yml is missing or still a placeholder.
     # Stateful: no-op if an existing *.<parent> wildcard already covers fqdn.
     if not skip_infra:
         print(f"\nStep 5g2: UniFi gateway DNS for {fqdn}")
-        ensure_unifi_dns(fqdn, a_value=NGINX_HOST)
+        unifi.ensure_dns(fqdn, a_value=NGINX_HOST)
 
     # Step 5g3: Reconcile UniFi wildcards against nginx-certs.yml — every zone
     # nginx serves should have a matching *.<zone> A+AAAA pair on the gateway.
     # Declarative: deletions on the gateway get healed on any re-run.
     if not skip_infra:
         print(f"\nStep 5g3: UniFi wildcard sync (zones from nginx-certs.yml)")
-        sync_unifi_wildcards()
+        zones = sl_nginx.cert_zones()
+        if zones:
+            unifi.sync_wildcards(zones, NGINX_HOST)
 
 
     # Step 6: Commit + push app changes
@@ -1839,10 +1085,10 @@ def main():
     if not skip_infra and lxc_ip:
         print(f"\nStep 8: Run ansible end-to-end")
         target_host = f"{app_name}.melbourne"
-        install_docker_on(target_host)
-        issue_certs()
-        deploy_scottycore_app(target_host)
-        publish_vhost()
+        ansible_run.install_docker(target_host)
+        ansible_run.issue_certs()
+        ansible_run.deploy_scottycore_app(target_host)
+        ansible_run.publish_vhost()
 
     print(f"\n{'='*60}")
     print(f"  Done! '{app_name}' is now part of the ScottyCore ecosystem.")
