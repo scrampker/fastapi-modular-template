@@ -31,19 +31,6 @@ scottyscan:
   # The origin app. Most patterns were extracted from here.
   # PowerShell scanner side is domain-specific; webapp side adopts core.
 
-scottomation:
-  path: /script/scottomation
-  stack: FastAPI + React (Docker / HA add-on)
-  branch: main
-  # IFTTT-scale automation platform with ScottyScript DSL.
-  # Runs as Docker container or Home Assistant add-on.
-  # v1 scope: Home Assistant automations via connector architecture.
-
-scottysync:
-  path: /script/scottysync
-  stack: FastAPI
-  branch: master
-
 scottybiz:
   path: /script/scottybiz
   stack: FastAPI
@@ -57,3 +44,10 @@ scottystrike:
   branch: master
   port: 8101
   fqdn: scottystrike.scotty.consulting
+
+scottomation:
+  path: /script/scottomation
+  stack: FastAPI + React (automation platform)
+  branch: main
+  port: 8099
+  fqdn: scottomation.scotty.consulting
