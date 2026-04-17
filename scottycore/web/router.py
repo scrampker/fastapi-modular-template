@@ -96,6 +96,12 @@ async def admin_settings_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "admin_settings.html")
 
 
+@web_router.get("/admin/backups", response_class=HTMLResponse, include_in_schema=False)
+async def admin_backups_page(request: Request) -> HTMLResponse:
+    """PBS-style backup console — superadmin only."""
+    return templates.TemplateResponse(request, "admin_backups.html")
+
+
 @web_router.get("/c/{slug}/settings", response_class=HTMLResponse, include_in_schema=False)
 async def tenant_settings_page(request: Request, slug: str) -> HTMLResponse:
     """Tenant settings — tenant admin only."""
