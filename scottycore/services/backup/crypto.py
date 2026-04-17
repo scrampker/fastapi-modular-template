@@ -31,13 +31,27 @@ class CryptoError(Exception):
     """GPG invocation failed or produced wrong output."""
 
 
+def _normalise_passphrase(passphrase: str) -> str:
+    """Strip trailing newlines that GPG silently discards from passphrase files.
+
+    GPG reads passphrases line-by-line and stops at the first newline, so
+    ``"pw\\n"`` and ``"pw"`` produce the same encryption key.  Normalising
+    here keeps the Python API consistent with GPG's behaviour and prevents the
+    fingerprint from diverging from the actual key used.
+    """
+    return passphrase.rstrip("\n\r")
+
+
 def fingerprint(passphrase: str) -> str:
     """Stable, short identifier for a passphrase.
 
     First 4 bytes (8 hex chars) of SHA-256. Collision chance ≈ 2**-16 per
     pair, which is fine for a user-facing "which key was this?" hint.
+
+    The passphrase is normalised (trailing newlines stripped) before hashing
+    to stay consistent with GPG's passphrase-file behaviour.
     """
-    h = hashlib.sha256(passphrase.encode("utf-8")).digest()
+    h = hashlib.sha256(_normalise_passphrase(passphrase).encode("utf-8")).digest()
     return h[:4].hex()
 
 
@@ -46,7 +60,11 @@ async def encrypt_bundle(data: bytes, passphrase: str) -> bytes:
 
     Returns the ciphertext (OpenPGP packet stream, raw binary — no ASCII
     armor). Caller should write this to ``...tar.gz.gpg``.
+
+    Trailing newlines are stripped from the passphrase before use because GPG
+    reads passphrases line-by-line and silently discards them.
     """
+    passphrase = _normalise_passphrase(passphrase)
     if not passphrase:
         raise CryptoError("empty passphrase is not allowed")
 
@@ -93,7 +111,12 @@ async def encrypt_bundle(data: bytes, passphrase: str) -> bytes:
 
 
 async def decrypt_bundle(data: bytes, passphrase: str) -> bytes:
-    """Decrypt a blob previously produced by :func:`encrypt_bundle`."""
+    """Decrypt a blob previously produced by :func:`encrypt_bundle`.
+
+    Trailing newlines are stripped from the passphrase to stay consistent with
+    :func:`encrypt_bundle` and GPG's passphrase-file behaviour.
+    """
+    passphrase = _normalise_passphrase(passphrase)
     if not passphrase:
         raise CryptoError("empty passphrase is not allowed")
 
