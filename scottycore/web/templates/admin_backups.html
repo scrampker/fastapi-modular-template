@@ -1,0 +1,565 @@
+{% extends "base.html" %}
+
+{% block title %}Backup &amp; Restore{% endblock %}
+{% block page_title %}Backup &amp; Restore{% endblock %}
+
+{% block breadcrumb %}
+<p class="text-xs text-slate-500 mt-0.5">Platform backups, schedules, and snapshot history</p>
+{% endblock %}
+
+{% block content %}
+<div x-data="backupsPage()" x-init="init()" class="space-y-6">
+
+  {# ── Tab bar ─────────────────────────────────────────────────────── #}
+  <div class="flex items-center justify-between border-b border-slate-800">
+    <nav class="flex gap-1 -mb-px">
+      <template x-for="tab in tabs" :key="tab.id">
+        <button @click="switchTab(tab.id)"
+                :class="activeTab === tab.id
+                  ? 'border-blue-500 text-blue-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'"
+                class="px-4 py-2 border-b-2 text-sm font-medium transition-colors">
+          <span x-text="tab.label"></span>
+          <span x-show="tab.count !== null" x-text="'(' + tab.count + ')'"
+                class="ml-1 text-xs text-slate-500"></span>
+        </button>
+      </template>
+    </nav>
+    <button @click="openNewBackup()"
+            class="inline-flex items-center gap-2 rounded-lg bg-blue-600 hover:bg-blue-500
+                   text-white text-sm font-medium px-4 py-2 transition-colors">
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round"
+              d="M12 4v16m8-8H4" />
+      </svg>
+      New backup
+    </button>
+  </div>
+
+  {# ── Datastores ─────────────────────────────────────────────────── #}
+  <section x-show="activeTab === 'datastores'" class="space-y-4">
+    <p class="text-sm text-slate-400">
+      Configured storage targets. Add a datastore in your scheduler config or
+      point ``SCOTTYCORE_BACKUP_STORE`` to a local directory.
+    </p>
+    <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+      <template x-for="ds in datastores" :key="ds.id">
+        <div class="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+          <div class="flex items-start justify-between">
+            <div>
+              <h3 class="text-sm font-medium text-slate-200" x-text="ds.label"></h3>
+              <p class="text-xs text-slate-500 mt-0.5" x-text="ds.sink_type"></p>
+            </div>
+            <span class="text-xs px-2 py-0.5 rounded-full"
+                  :class="ds.managed_by === 'scottydev'
+                    ? 'bg-indigo-900/50 text-indigo-300'
+                    : 'bg-emerald-900/50 text-emerald-300'"
+                  x-text="ds.managed_by === 'scottydev' ? '🌐 ScottyDev' : '💻 LOCAL'"></span>
+          </div>
+          <dl class="mt-3 text-xs text-slate-400 space-y-1">
+            <div class="flex justify-between">
+              <dt>Snapshots</dt>
+              <dd x-text="ds.snapshot_count"></dd>
+            </div>
+            <div class="flex justify-between">
+              <dt>Total size</dt>
+              <dd x-text="formatBytes(ds.total_bytes)"></dd>
+            </div>
+          </dl>
+        </div>
+      </template>
+      <div x-show="datastores.length === 0"
+           class="col-span-full text-center py-8 text-sm text-slate-500">
+        No datastores configured.
+      </div>
+    </div>
+  </section>
+
+  {# ── Jobs (schedules) ───────────────────────────────────────────── #}
+  <section x-show="activeTab === 'jobs'" class="space-y-4">
+    <div class="flex items-center justify-end">
+      <button @click="openNewSchedule()"
+              class="inline-flex items-center gap-2 rounded-lg border border-slate-700
+                     hover:border-slate-500 text-slate-200 text-sm font-medium px-3 py-1.5
+                     transition-colors">
+        + New schedule
+      </button>
+    </div>
+
+    <div class="rounded-lg border border-slate-800 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-900 text-xs uppercase tracking-wider text-slate-500">
+          <tr>
+            <th class="text-left px-4 py-2">Name</th>
+            <th class="text-left px-4 py-2">Scope</th>
+            <th class="text-left px-4 py-2">Schedule</th>
+            <th class="text-left px-4 py-2">Kind</th>
+            <th class="text-left px-4 py-2">Sink</th>
+            <th class="text-left px-4 py-2">Next run</th>
+            <th class="text-left px-4 py-2">Owner</th>
+            <th class="text-right px-4 py-2">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          <template x-for="s in schedules" :key="s.id">
+            <tr class="hover:bg-slate-900/40">
+              <td class="px-4 py-2 text-slate-200" x-text="s.name"></td>
+              <td class="px-4 py-2 text-slate-400">
+                <span x-text="s.scope"></span>
+                <span x-show="s.tenant_slug" class="text-slate-500">/ <span x-text="s.tenant_slug"></span></span>
+              </td>
+              <td class="px-4 py-2 font-mono text-xs text-slate-400"
+                  x-text="s.cron_expr || 'one-shot'"></td>
+              <td class="px-4 py-2 text-slate-400" x-text="s.kind"></td>
+              <td class="px-4 py-2 text-slate-400" x-text="s.sink_type"></td>
+              <td class="px-4 py-2 text-slate-500 text-xs"
+                  x-text="s.next_run_at ? formatTs(s.next_run_at) : '—'"></td>
+              <td class="px-4 py-2">
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="s.managed_by === 'scottydev'
+                        ? 'bg-indigo-900/50 text-indigo-300'
+                        : 'bg-emerald-900/50 text-emerald-300'"
+                      x-text="s.managed_by === 'scottydev' ? '🌐' : '💻'"></span>
+              </td>
+              <td class="px-4 py-2 text-right">
+                <button @click="deleteSchedule(s)"
+                        :disabled="s.managed_by === 'scottydev'"
+                        :title="s.managed_by === 'scottydev' ? 'Managed by ScottyDev — detach first' : 'Delete'"
+                        class="text-red-400 hover:text-red-300 text-xs disabled:opacity-40
+                               disabled:cursor-not-allowed">
+                  Delete
+                </button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="schedules.length === 0">
+            <td colspan="8" class="text-center py-8 text-sm text-slate-500">
+              No schedules configured.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {# ── Snapshots (run history) ────────────────────────────────────── #}
+  <section x-show="activeTab === 'snapshots'" class="space-y-4">
+    <div class="rounded-lg border border-slate-800 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-900 text-xs uppercase tracking-wider text-slate-500">
+          <tr>
+            <th class="text-left px-4 py-2">Started</th>
+            <th class="text-left px-4 py-2">Scope</th>
+            <th class="text-left px-4 py-2">Kind</th>
+            <th class="text-left px-4 py-2">Status</th>
+            <th class="text-left px-4 py-2">Sink</th>
+            <th class="text-left px-4 py-2">Size</th>
+            <th class="text-left px-4 py-2">Encrypted</th>
+            <th class="text-right px-4 py-2">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          <template x-for="r in runs" :key="r.id">
+            <tr class="hover:bg-slate-900/40">
+              <td class="px-4 py-2 text-slate-300 text-xs" x-text="formatTs(r.started_at || r.created_at)"></td>
+              <td class="px-4 py-2 text-slate-400">
+                <span x-text="r.scope"></span>
+                <span x-show="r.tenant_slug" class="text-slate-500">/ <span x-text="r.tenant_slug"></span></span>
+              </td>
+              <td class="px-4 py-2 text-slate-400" x-text="r.kind"></td>
+              <td class="px-4 py-2">
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="statusClass(r.status)"
+                      x-text="r.status"></span>
+              </td>
+              <td class="px-4 py-2 text-slate-400 text-xs" x-text="r.sink_type"></td>
+              <td class="px-4 py-2 text-slate-400 text-xs" x-text="formatBytes(r.bytes_written)"></td>
+              <td class="px-4 py-2 text-slate-400 text-xs">
+                <template x-if="r.encrypted">
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M10 2a4 4 0 00-4 4v2H5a2 2 0 00-2 2v7a2 2 0 002 2h10a2 2 0 002-2v-7a2 2 0 00-2-2h-1V6a4 4 0 00-4-4zm2 6V6a2 2 0 10-4 0v2h4z"/>
+                    </svg>
+                    <span class="font-mono" x-text="r.key_fingerprint"></span>
+                  </span>
+                </template>
+                <span x-show="!r.encrypted" class="text-slate-600">plain</span>
+              </td>
+              <td class="px-4 py-2 text-right text-xs space-x-2">
+                <button x-show="r.status === 'success'"
+                        @click="openRestore(r)"
+                        class="text-blue-400 hover:text-blue-300">Restore</button>
+                <button x-show="r.status === 'failed'"
+                        @click="showError(r)"
+                        class="text-red-400 hover:text-red-300">View error</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="runs.length === 0">
+            <td colspan="8" class="text-center py-8 text-sm text-slate-500">
+              No snapshots yet.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {# ── Contributors (info panel) ──────────────────────────────────── #}
+  <section x-show="activeTab === 'contributors'" class="space-y-4">
+    <p class="text-sm text-slate-400">
+      Modules that contribute data to backups. Each contributor exports its own
+      slice and restores it in the order shown (FK-safe).
+    </p>
+    <div class="rounded-lg border border-slate-800 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-900 text-xs uppercase tracking-wider text-slate-500">
+          <tr>
+            <th class="text-left px-4 py-2">ID</th>
+            <th class="text-left px-4 py-2">Scopes</th>
+            <th class="text-left px-4 py-2">Description</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          <template x-for="c in contributors" :key="c.id">
+            <tr>
+              <td class="px-4 py-2 font-mono text-slate-200" x-text="c.id"></td>
+              <td class="px-4 py-2 text-slate-400 text-xs" x-text="c.scopes.join(', ')"></td>
+              <td class="px-4 py-2 text-slate-400 text-xs" x-text="c.description"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {# ── New-backup modal ───────────────────────────────────────────── #}
+  <div x-show="modal === 'new'" x-cloak
+       class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+       @click.self="modal = null">
+    <div class="w-full max-w-md rounded-xl bg-slate-900 border border-slate-700 p-6 space-y-4">
+      <h2 class="text-lg font-medium text-slate-100">Start a backup</h2>
+      <div class="space-y-3 text-sm">
+        <label class="block">
+          <span class="text-slate-400">Scope</span>
+          <select x-model="form.scope"
+                  class="w-full mt-1 rounded-lg bg-slate-950 border border-slate-700
+                         text-slate-200 px-3 py-2">
+            <option value="platform">Platform (all data)</option>
+            <option value="tenant">Tenant</option>
+          </select>
+        </label>
+        <label x-show="form.scope === 'tenant'" class="block">
+          <span class="text-slate-400">Tenant slug</span>
+          <input x-model="form.tenant_slug" type="text"
+                 class="w-full mt-1 rounded-lg bg-slate-950 border border-slate-700
+                        text-slate-200 px-3 py-2" />
+        </label>
+        <label class="block">
+          <span class="text-slate-400">Destination</span>
+          <select x-model="form.sink_type"
+                  class="w-full mt-1 rounded-lg bg-slate-950 border border-slate-700
+                         text-slate-200 px-3 py-2">
+            <option value="download">Download to my browser</option>
+            <option value="local_disk">Local disk on this host</option>
+            <option value="scottydev">Push to ScottyDev</option>
+          </select>
+        </label>
+        <label class="block">
+          <span class="text-slate-400">Passphrase (optional — strongly recommended)</span>
+          <input x-model="form.passphrase" type="password"
+                 placeholder="Leave blank for unencrypted"
+                 class="w-full mt-1 rounded-lg bg-slate-950 border border-slate-700
+                        text-slate-200 px-3 py-2" />
+          <p class="text-xs text-slate-500 mt-1">
+            <strong>Save this passphrase now.</strong> It cannot be recovered. A
+            fingerprint will be stamped on the snapshot so you can identify which
+            saved passphrase to use during restore.
+          </p>
+        </label>
+      </div>
+      <div class="flex items-center justify-end gap-2 pt-2">
+        <button @click="modal = null"
+                class="text-sm text-slate-400 hover:text-slate-200 px-3 py-1.5">
+          Cancel
+        </button>
+        <button @click="runBackup()" :disabled="running"
+                class="rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40
+                       text-white text-sm font-medium px-4 py-2">
+          <span x-show="!running">Start</span>
+          <span x-show="running">Running…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  {# ── Restore modal ──────────────────────────────────────────────── #}
+  <div x-show="modal === 'restore'" x-cloak
+       class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+       @click.self="modal = null">
+    <div class="w-full max-w-md rounded-xl bg-slate-900 border border-slate-700 p-6 space-y-4">
+      <h2 class="text-lg font-medium text-slate-100">Restore snapshot</h2>
+      <p class="text-xs text-slate-400" x-text="restoreRun?.sink_locator"></p>
+      <div class="text-xs text-slate-400 space-y-1">
+        <div>Scope: <span x-text="restoreRun?.scope"></span></div>
+        <div>Size: <span x-text="formatBytes(restoreRun?.bytes_written)"></span></div>
+        <div x-show="restoreRun?.encrypted">
+          Encrypted — key <span class="font-mono" x-text="restoreRun?.key_fingerprint"></span>
+        </div>
+      </div>
+      <label x-show="restoreRun?.encrypted" class="block text-sm">
+        <span class="text-slate-400">Passphrase</span>
+        <input x-model="form.restore_passphrase" type="password"
+               class="w-full mt-1 rounded-lg bg-slate-950 border border-slate-700
+                      text-slate-200 px-3 py-2" />
+      </label>
+      <p class="text-xs text-red-400">
+        This will merge the snapshot's data into the current database. Existing
+        rows with matching primary keys are updated.
+      </p>
+      <div class="flex items-center justify-end gap-2 pt-2">
+        <button @click="modal = null"
+                class="text-sm text-slate-400 hover:text-slate-200 px-3 py-1.5">Cancel</button>
+        <button @click="runRestore()" :disabled="running"
+                class="rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40
+                       text-white text-sm font-medium px-4 py-2">
+          <span x-show="!running">Restore</span>
+          <span x-show="running">Restoring…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function backupsPage() {
+  return {
+    activeTab: localStorage.getItem('sc_backupsTab') || 'datastores',
+    tabs: [
+      { id: 'datastores',   label: 'Datastores',   count: null },
+      { id: 'jobs',         label: 'Jobs',         count: null },
+      { id: 'snapshots',    label: 'Snapshots',    count: null },
+      { id: 'contributors', label: 'Contributors', count: null },
+    ],
+    datastores: [],
+    schedules: [],
+    runs: [],
+    contributors: [],
+    modal: null,
+    running: false,
+    restoreRun: null,
+    form: {
+      scope: 'platform',
+      tenant_slug: '',
+      sink_type: 'download',
+      passphrase: '',
+      restore_passphrase: '',
+    },
+
+    async init() {
+      await Promise.all([this.loadRuns(), this.loadSchedules(), this.loadContributors()]);
+      this.rebuildDatastores();
+    },
+
+    switchTab(id) {
+      this.activeTab = id;
+      localStorage.setItem('sc_backupsTab', id);
+    },
+
+    async loadRuns() {
+      const r = await fetch('/api/v1/backups/runs?limit=100', {
+        headers: Auth.getHeaders(),
+      });
+      if (r.ok) {
+        this.runs = await r.json();
+        this.tabs.find(t => t.id === 'snapshots').count = this.runs.length;
+      }
+    },
+
+    async loadSchedules() {
+      const r = await fetch('/api/v1/backups/schedules', { headers: Auth.getHeaders() });
+      if (r.ok) {
+        this.schedules = await r.json();
+        this.tabs.find(t => t.id === 'jobs').count = this.schedules.length;
+      }
+    },
+
+    async loadContributors() {
+      const r = await fetch('/api/v1/backups/contributors', { headers: Auth.getHeaders() });
+      if (r.ok) {
+        this.contributors = await r.json();
+      }
+    },
+
+    /** Roll the BackupRun rows up into per-sink cards. */
+    rebuildDatastores() {
+      const by = new Map();
+      for (const r of this.runs) {
+        const key = r.sink_type;
+        if (!by.has(key)) {
+          by.set(key, {
+            id: key,
+            label: this._sinkLabel(key),
+            sink_type: key,
+            managed_by: 'local',
+            snapshot_count: 0,
+            total_bytes: 0,
+          });
+        }
+        const ds = by.get(key);
+        ds.snapshot_count += 1;
+        ds.total_bytes += (r.bytes_written || 0);
+      }
+      this.datastores = Array.from(by.values());
+      this.tabs.find(t => t.id === 'datastores').count = this.datastores.length;
+    },
+
+    _sinkLabel(sink_type) {
+      return {
+        'local_disk': 'Local disk',
+        'scottydev':  'ScottyDev',
+        'download':   'Browser downloads',
+        'remote_node': 'Remote node (SSH)',
+      }[sink_type] || sink_type;
+    },
+
+    openNewBackup() { this.modal = 'new'; },
+
+    openRestore(run) {
+      this.restoreRun = run;
+      this.form.restore_passphrase = '';
+      this.modal = 'restore';
+    },
+
+    async runBackup() {
+      this.running = true;
+      try {
+        const body = {
+          scope: this.form.scope,
+          tenant_slug: this.form.scope === 'tenant' ? this.form.tenant_slug : null,
+          sink_type: this.form.sink_type,
+          sink_config: {},
+          passphrase: this.form.passphrase || null,
+        };
+        if (this.form.sink_type === 'download') {
+          const res = await fetch('/api/v1/backups/export/download', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...Auth.getHeaders() },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const blob = await res.blob();
+          const fn = (res.headers.get('content-disposition') || '')
+            .match(/filename="([^"]+)"/)?.[1] || 'backup.tar.gz';
+          this._download(blob, fn);
+          showToast('Backup downloaded.', 'success');
+        } else {
+          const res = await fetch('/api/v1/backups/export', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...Auth.getHeaders() },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          showToast(`Backup stored: ${data.locator}`, 'success');
+        }
+        this.modal = null;
+        await this.loadRuns();
+        this.rebuildDatastores();
+      } catch (e) {
+        showToast(`Backup failed: ${e.message || e}`, 'error');
+      } finally {
+        this.running = false;
+      }
+    },
+
+    async runRestore() {
+      if (!this.restoreRun) return;
+      this.running = true;
+      try {
+        const res = await fetch('/api/v1/backups/restore', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...Auth.getHeaders() },
+          body: JSON.stringify({
+            sink_type: this.restoreRun.sink_type,
+            locator: this.restoreRun.sink_locator,
+            sink_config: {},
+            passphrase: this.form.restore_passphrase || null,
+          }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const summary = await res.json();
+        showToast(
+          `Restored ${summary.total_rows_upserted} rows from ${summary.contributors_restored.length} contributors.`,
+          'success'
+        );
+        this.modal = null;
+      } catch (e) {
+        showToast(`Restore failed: ${e.message || e}`, 'error');
+      } finally {
+        this.running = false;
+      }
+    },
+
+    async deleteSchedule(s) {
+      if (!confirm(`Delete schedule "${s.name}"?`)) return;
+      const res = await fetch(`/api/v1/backups/schedules/${s.id}`, {
+        method: 'DELETE',
+        headers: Auth.getHeaders(),
+      });
+      if (res.ok) {
+        showToast('Schedule deleted.', 'success');
+        await this.loadSchedules();
+      } else {
+        const err = await res.text();
+        showToast(`Delete failed: ${err}`, 'error');
+      }
+    },
+
+    showError(run) {
+      alert(run.error || 'No error message recorded.');
+    },
+
+    openNewSchedule() {
+      alert('Schedule creation UI — coming in the next pass.');
+    },
+
+    /* ── Formatters ──────────────────────────────────────────────── */
+    formatBytes(n) {
+      if (!n) return '0 B';
+      const u = ['B','KB','MB','GB','TB'];
+      let i = 0, x = n;
+      while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }
+      return `${x.toFixed(1)} ${u[i]}`;
+    },
+    formatTs(s) {
+      if (!s) return '—';
+      const d = new Date(s);
+      return d.toLocaleString();
+    },
+    statusClass(status) {
+      return {
+        'success': 'bg-emerald-900/50 text-emerald-300',
+        'failed':  'bg-red-900/50 text-red-300',
+        'running': 'bg-amber-900/50 text-amber-300',
+        'pending': 'bg-slate-800 text-slate-400',
+      }[status] || 'bg-slate-800 text-slate-400';
+    },
+
+    _download(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    },
+  };
+}
+</script>
+{% endblock %}

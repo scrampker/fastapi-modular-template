@@ -43,6 +43,7 @@ COPY scottycore/ scottycore/
 # Create a non-root user and hand ownership of the working directory to it
 RUN groupadd --gid 1000 appuser && \
     useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser && \
+    mkdir -p /app/data && \
     chown -R appuser:appuser /app
 
 USER appuser
