@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from scottycore.services.audit.service import AuditService
 from scottycore.services.auth.service import AuthService
+from scottycore.services.backup.service import BackupService
+from scottycore.services.backup.wiring import build_backup_service
 from scottycore.services.tenants.service import TenantsService
 from scottycore.services.users.service import UsersService
 from scottycore.services.search.service import SearchService
@@ -49,4 +51,11 @@ class ServiceRegistry:
         self.search = SearchService(
             self.items,
             self.tenants,
+        )
+
+        # Layer 3: Backup — consumer apps can register additional contributors
+        # on this instance after ServiceRegistry construction.
+        self.backup: BackupService = build_backup_service(
+            session_factory,
+            self.audit,
         )
