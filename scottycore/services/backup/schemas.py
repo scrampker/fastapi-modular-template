@@ -50,10 +50,18 @@ class ManifestContributorEntry(BaseModel):
     files: int
 
 
+#: Highest manifest ``schema_version`` this build of scottycore can restore.
+#: Bump when the tarball layout or manifest fields change in a backward-
+#: incompatible way. Restores reject manifests whose version is higher than
+#: this constant — older bundles continue to work (backward compatibility is
+#: handled inside contributors).
+SUPPORTED_SCHEMA_VERSION: int = 1
+
+
 class BackupManifest(BaseModel):
     """Top-level metadata for a backup bundle (written as manifest.json)."""
 
-    schema_version: int = 1
+    schema_version: int = SUPPORTED_SCHEMA_VERSION
     scope: BackupScope
     tenant_slug: str | None = None  # only set when scope == TENANT
     timestamp: datetime

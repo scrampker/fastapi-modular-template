@@ -27,12 +27,17 @@ from scottycore.services.audit.schemas import AuditLogCreate
 from scottycore.services.audit.service import AuditService
 from scottycore.services.backup.contributor import BackupContributor
 from scottycore.services.backup.schemas import (
+    SUPPORTED_SCHEMA_VERSION,
     BackupManifest,
     BackupScope,
     ContributorInfo,
     ManifestContributorEntry,
     RestoreSummary,
 )
+
+
+class UnsupportedBundleError(ValueError):
+    """Raised when a bundle's schema_version exceeds what this build supports."""
 
 class BackupService:
     """Coordinates backup and restore across all registered contributors."""
@@ -193,6 +198,12 @@ class BackupService:
         Audit action: ``backup.platform.restore`` or ``backup.tenant.restore``.
         """
         manifest, contributor_data = self._extract_bundle(bundle_bytes)
+
+        if manifest.schema_version > SUPPORTED_SCHEMA_VERSION:
+            raise UnsupportedBundleError(
+                f"bundle schema_version={manifest.schema_version} exceeds "
+                f"supported={SUPPORTED_SCHEMA_VERSION}; upgrade scottycore to restore"
+            )
 
         scope = manifest.scope
         tenant_id: str | None = None
