@@ -4,7 +4,22 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from scottycore.api.v1 import admin, ai_backends, audit, auth, files, items, search, settings, tasks, tenants, upload, users, ws
+from scottycore.api.v1 import (
+    admin,
+    ai_backends,
+    audit,
+    auth,
+    backup,
+    files,
+    items,
+    search,
+    settings,
+    tasks,
+    tenants,
+    upload,
+    users,
+    ws,
+)
 
 api_v1_router = APIRouter()
 
@@ -59,3 +74,6 @@ api_v1_router.include_router(upload.router, prefix="/upload", tags=["upload"])
 
 # WebSocket (task streaming)
 api_v1_router.include_router(ws.router)
+
+# Backup / restore
+api_v1_router.include_router(backup.router, prefix="/backups", tags=["backups"])
