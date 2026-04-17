@@ -71,4 +71,4 @@ scottydev:
   stack: FastAPI
   branch: master
   port: 8103
-  fqdn: scottydev.corpaholics.com
+  fqdn: scottydev.scotty.consulting
