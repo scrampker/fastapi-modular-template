@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar
@@ -49,7 +50,12 @@ class LocalDiskSink(StorageSink):
         target.parent.mkdir(parents=True, exist_ok=True)
 
         def _write() -> None:
-            tmp = target.with_suffix(target.suffix + ".part")
+            # Use a per-write unique temp name to avoid a race when two puts
+            # land on the same target simultaneously.  A shared ".part" suffix
+            # means concurrent writers clobber each other's temp file before the
+            # atomic rename, producing FileNotFoundError.  Using the thread's
+            # OS-level pid + object id gives a collision-free temp name.
+            tmp = Path(f"{target}.{os.getpid()}.{id(blob):016x}.part")
             tmp.write_bytes(blob.data)
             tmp.replace(target)
             sidecar = target.with_suffix(target.suffix + ".meta.json")
