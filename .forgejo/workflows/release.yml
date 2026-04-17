@@ -29,6 +29,7 @@ env:
     scottystrike
     scottybiz
     scottylab-app
+    scottydev
 
 jobs:
   release:

@@ -65,3 +65,10 @@ scottylab-app:
   branch: master
   port: 8102
   fqdn: scottylab.scotty.consulting
+
+scottydev:
+  path: /script/scottydev
+  stack: FastAPI
+  branch: master
+  port: 8103
+  fqdn: scottydev.corpaholics.com
