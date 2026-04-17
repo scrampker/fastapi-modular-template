@@ -142,10 +142,11 @@ def create_app() -> FastAPI:
     from scottycore.web.router import web_router
     app.include_router(web_router)
 
-    # Static files (CSS / JS)
-    _static_dir = os.path.join(os.path.dirname(__file__), "web", "static")
-    if os.path.isdir(_static_dir):
-        app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+    # Static files (CSS / JS) — delegate to the public helper so consumer
+    # apps that replicate create_app() can reuse the exact same logic.
+    from scottycore.web import install_static
+
+    install_static(app, overlay_mount_path="")
 
     # Health check (no auth required)
     import sys
