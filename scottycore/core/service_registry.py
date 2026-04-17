@@ -58,4 +58,5 @@ class ServiceRegistry:
         self.backup: BackupService = build_backup_service(
             session_factory,
             self.audit,
+            uploads_base_dir=uploads_base_dir,
         )

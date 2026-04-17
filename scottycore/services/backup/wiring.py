@@ -17,6 +17,8 @@ from scottycore.services.backup.contributors import (
     TenantsContributor,
     UsersContributor,
 )
+from scottycore.services.backup.files_contributor import FilesContributor
+from scottycore.services.backup.secrets_contributor import SecretsContributor
 from scottycore.services.backup.service import BackupService
 
 
@@ -26,8 +28,14 @@ def build_backup_service(
     *,
     app_name: str | None = None,
     app_version: str | None = None,
+    uploads_base_dir: str | None = None,
 ) -> BackupService:
-    """Build a BackupService and pre-register the scottycore built-ins."""
+    """Build a BackupService and pre-register the scottycore built-ins.
+
+    ``uploads_base_dir`` should match the path passed to FilesService. When
+    omitted, FilesContributor is NOT registered — consumer apps that don't
+    store files (e.g. scottydev itself) can skip it cleanly.
+    """
     svc = BackupService(
         session_factory=session_factory,
         audit_service=audit_service,
@@ -38,6 +46,9 @@ def build_backup_service(
     svc.register(TenantsContributor(session_factory))
     svc.register(UsersContributor(session_factory))
     svc.register(SettingsContributor(session_factory))
+    svc.register(SecretsContributor(session_factory))
     svc.register(ItemsContributor(session_factory))
     svc.register(AuditLogContributor(session_factory))
+    if uploads_base_dir:
+        svc.register(FilesContributor(uploads_base_dir, session_factory))
     return svc
