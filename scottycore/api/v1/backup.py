@@ -142,7 +142,7 @@ def _build_sink(sink_type: str, sink_config: dict) -> StorageSink:
     if sink_type == "download":
         return DownloadSink()
     if sink_type == "local_disk":
-        root = sink_config.get("root_dir", "/app/data/backups")
+        root = sink_config.get("root_dir") or "/app/data/backups"
         return LocalDiskSink(root)
     if sink_type == "scottydev":
         base = sink_config.get("base_url")
@@ -200,7 +200,7 @@ async def export(
 ) -> ExportResponse:
     ip = request.client.host if request.client else ""
     if payload.scope == BackupScope.PLATFORM:
-        bundle = await svc.export_platform(user_id=user.id, ip=ip)
+        bundle = await svc.export_platform(user_id=user.user_id, ip=ip)
         tenant_slug = None
     else:
         if not payload.tenant_slug:
@@ -217,7 +217,7 @@ async def export(
         bundle = await svc.export_tenant(
             tenant_id=str(t.id),
             tenant_slug=t.slug,
-            user_id=user.id,
+            user_id=user.user_id,
             ip=ip,
         )
         tenant_slug = t.slug
@@ -282,7 +282,7 @@ async def export_download(
     ip = request.client.host if request.client else ""
 
     if payload.scope == BackupScope.PLATFORM:
-        bundle = await svc.export_platform(user_id=user.id, ip=ip)
+        bundle = await svc.export_platform(user_id=user.user_id, ip=ip)
         tenant_slug = None
     else:
         if not payload.tenant_slug:
@@ -298,7 +298,7 @@ async def export_download(
         bundle = await svc.export_tenant(
             tenant_id=str(t.id),
             tenant_slug=t.slug,
-            user_id=user.id,
+            user_id=user.user_id,
             ip=ip,
         )
         tenant_slug = t.slug
@@ -348,7 +348,7 @@ async def restore(
 
     ip = request.client.host if request.client else ""
     try:
-        return await svc.restore_bundle(data, user_id=user.id, ip=ip)
+        return await svc.restore_bundle(data, user_id=user.user_id, ip=ip)
     except UnsupportedBundleError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -372,7 +372,7 @@ async def restore_upload(
             raise HTTPException(400, f"decrypt failed: {exc}") from exc
     ip = request.client.host if request.client else ""
     try:
-        return await svc.restore_bundle(data, user_id=user.id, ip=ip)
+        return await svc.restore_bundle(data, user_id=user.user_id, ip=ip)
     except UnsupportedBundleError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -426,7 +426,7 @@ async def create_schedule(
             kind=payload.kind,
             retention_days=payload.retention_days,
             keep_last=payload.keep_last,
-            created_by=str(user.id),
+            created_by=str(user.user_id),
         )
         s.add(row)
         await s.commit()
