@@ -130,7 +130,17 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # Request logging middleware (dual-mode: file + optional stdout for containers)
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+    # Respect SCOTTYCORE_DATA_DIR, then /app/data (the Dockerfile default), then
+    # a path relative to scottycore's install — that last one only exists when
+    # running from a checkout; site-packages installs fall back to /app/data.
+    data_dir = os.environ.get("SCOTTYCORE_DATA_DIR")
+    if not data_dir:
+        default_abs = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "data"
+        )
+        data_dir = default_abs if os.access(
+            os.path.dirname(default_abs), os.W_OK
+        ) else "/app/data"
     setup_logging(settings.app_name, data_dir, log_stdout=settings.app_env != "development")
     app.add_middleware(RequestLoggingMiddleware, app_debug=settings.app_debug)
 
