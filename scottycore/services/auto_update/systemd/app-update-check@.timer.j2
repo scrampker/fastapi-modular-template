@@ -1,0 +1,11 @@
+[Unit]
+Description={{ display_name }} app generic git-pull update timer (%i)
+
+[Timer]
+OnBootSec=120s
+OnUnitActiveSec=60s
+Unit={{ framework_name }}-app-update-check@%i.service
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

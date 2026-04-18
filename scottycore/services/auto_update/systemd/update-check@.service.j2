@@ -1,0 +1,18 @@
+[Unit]
+Description={{ framework_name }} update poller (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory={{ apps_root }}/%i
+ExecStart=/usr/local/bin/{{ framework_name }}-update-check --repo-root {{ apps_root }}/%i
+# 75 = please-rebuild — a host-side pull-updater watches for exit 75 and
+# triggers ``docker compose up -d --build``.
+SuccessExitStatus=0 75
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+# Read the app's .env so DATABASE_URL, FORGEJO_TOKEN, etc. are available
+EnvironmentFile=-{{ apps_root }}/%i/.env

@@ -50,23 +50,33 @@ import httpx
 from packaging.version import InvalidVersion, Version
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from scottycore.core.brand import BrandConfig, get_brand
 from scottycore.services.settings.repository import SettingsRepository
 
 _log = logging.getLogger(__name__)
 
-#: Valid values for ``scottycore.update.mode``.
+#: Valid values for the ``<framework>.update.mode`` setting.
 MODE_OFF = "off"
 MODE_NOTIFY = "notify"
 MODE_AUTO = "auto"
 _MODES = {MODE_OFF, MODE_NOTIFY, MODE_AUTO}
 
-_SETTING_KEY = "scottycore.update.mode"
 _DEFAULT_MODE = MODE_NOTIFY
 
-#: Regex to pull the pin off a ``scottycore @ git+…@REF`` dependency entry.
-_PIN_RE = re.compile(
-    r"scottycore\s*@\s*git\+[^@]+@([^\s\"';]+)", re.IGNORECASE
-)
+
+def _default_forge_api(brand: BrandConfig) -> str:
+    """Derive the GitHub-style API base from the brand's framework repo URL.
+
+    ``https://github.com/owner/repo.git`` → ``https://api.github.com/repos/owner/repo``
+    Anything we can't parse falls back to the scotty default.
+    """
+    url = brand.framework_repo_url.rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    if url.startswith("https://github.com/"):
+        owner_repo = url[len("https://github.com/") :]
+        return f"https://api.github.com/repos/{owner_repo}"
+    return "https://api.github.com/repos/scrampker/scottycore"
 
 
 @dataclass(frozen=True)
@@ -97,13 +107,18 @@ class AutoUpdateService:
         *,
         repo_root: Path,
         session_factory: async_sessionmaker[AsyncSession],
-        forge_api: str = "https://api.github.com/repos/scrampker/scottycore",
+        forge_api: str | None = None,
         http_timeout: float = 10.0,
+        brand: BrandConfig | None = None,
     ) -> None:
+        self._brand = brand or get_brand()
         self._root = Path(repo_root).resolve()
         self._factory = session_factory
-        self._forge_api = forge_api.rstrip("/")
+        self._forge_api = (
+            forge_api or _default_forge_api(self._brand)
+        ).rstrip("/")
         self._timeout = http_timeout
+        self._pin_re = re.compile(self._brand.pin_pattern, re.IGNORECASE)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -187,9 +202,11 @@ class AutoUpdateService:
         if not pp.is_file():
             raise AutoUpdateError(f"no pyproject.toml at {pp}")
         text = pp.read_text(encoding="utf-8")
-        m = _PIN_RE.search(text)
+        m = self._pin_re.search(text)
         if not m:
-            raise AutoUpdateError("scottycore @ git+… dep not found in pyproject")
+            raise AutoUpdateError(
+                f"{self._brand.framework_name} @ git+… dep not found in pyproject"
+            )
         return m.group(1)
 
     def _bump_pin(self, current: str, latest: str) -> None:
@@ -204,12 +221,12 @@ class AutoUpdateService:
         _log.info("auto-update: pyproject.toml bumped %s → %s", current, latest)
 
     def _touch_rebuild_flag(self) -> None:
-        flag = self._root / ".scottycore-auto-update-requested"
+        flag = self._root / self._brand.rebuild_flag_filename
         flag.write_text(
             json.dumps(
                 {
                     "requested_at": datetime.now(timezone.utc).isoformat(),
-                    "reason": "scottycore auto-update bump",
+                    "reason": f"{self._brand.framework_name} auto-update bump",
                 }
             ),
             encoding="utf-8",
@@ -221,7 +238,9 @@ class AutoUpdateService:
         try:
             async with self._factory() as s:
                 repo = SettingsRepository(s)
-                row = await repo.get("global", None, _SETTING_KEY)
+                row = await repo.get(
+                    "global", None, self._brand.update_setting_key_mode
+                )
         except Exception as exc:  # noqa: BLE001
             _log.warning("auto-update: settings lookup failed: %s", exc)
             return _DEFAULT_MODE
@@ -239,8 +258,8 @@ class AutoUpdateService:
         """Drop a settings row so the UI can surface the update.
 
         We don't have a standalone notifications table; the settings key
-        ``scottycore.update.pending`` is the rendezvous point. The UI reads
-        this key to show the yellow "update available" banner.
+        ``<framework>.update.pending`` is the rendezvous point. The UI
+        reads this key to show the yellow "update available" banner.
         """
         try:
             async with self._factory() as s:
@@ -248,7 +267,7 @@ class AutoUpdateService:
                 await repo.upsert(
                     scope="global",
                     scope_id=None,
-                    key="scottycore.update.pending",
+                    key=self._brand.update_setting_key_pending,
                     value_json=json.dumps(
                         {
                             "current": current,

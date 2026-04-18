@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from scottycore import __version__
+from scottycore.core.brand import get_brand
 from scottycore.core.config import Settings, get_settings
 from scottycore.core.database import Base, get_engine, get_session_factory
 from scottycore.core.middleware import (
@@ -130,10 +131,13 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # Request logging middleware (dual-mode: file + optional stdout for containers)
-    # Respect SCOTTYCORE_DATA_DIR, then /app/data (the Dockerfile default), then
-    # a path relative to scottycore's install — that last one only exists when
-    # running from a checkout; site-packages installs fall back to /app/data.
-    data_dir = os.environ.get("SCOTTYCORE_DATA_DIR")
+    # Respect the brand's data_dir env var (SCOTTYCORE_DATA_DIR for scotty,
+    # BRIANCORE_DATA_DIR for a brian fork, etc.), then /app/data (the Dockerfile
+    # default), then a path relative to the framework install — that last one
+    # only exists when running from a checkout; site-packages installs fall
+    # back to /app/data.
+    brand = get_brand()
+    data_dir = os.environ.get(brand.data_dir_env_var)
     if not data_dir:
         default_abs = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "data"

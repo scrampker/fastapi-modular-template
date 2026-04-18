@@ -35,6 +35,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from scottycore.core.brand import get_brand
 from scottycore.services.backup.crypto import (
     CryptoError,
     decrypt_bundle,
@@ -74,9 +75,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    brand = get_brand()
     p = argparse.ArgumentParser(
-        prog="scottycore-backup",
-        description="Run scottycore backups and restores without the HTTP API.",
+        prog=f"{brand.framework_name}-backup",
+        description=(
+            f"Run {brand.framework_name} backups and restores without the "
+            "HTTP API."
+        ),
     )
     sub = p.add_subparsers(dest="command")
 

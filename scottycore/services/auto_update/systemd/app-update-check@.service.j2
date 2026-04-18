@@ -1,0 +1,12 @@
+[Unit]
+Description={{ display_name }} app generic git-pull update check (%i)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/{{ framework_name }}-app-update-check %i
+Environment=HOME=/root
+User=root
+StandardOutput=journal
+StandardError=journal
