@@ -1,0 +1,11 @@
+[Unit]
+Description=scottycore update poller timer (%i)
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+Unit=scottycore-update-check@%i.service
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
