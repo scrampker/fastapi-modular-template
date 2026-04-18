@@ -101,6 +101,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="orchestrator sink bearer token (or $SCOTTYDEV_TOKEN)",
     )
     ex.add_argument(
+        "--repo-url",
+        help="git_repo sink remote URL (any forge: forgejo/github/gitlab/ADO)",
+    )
+    ex.add_argument(
+        "--clone-dir",
+        help="git_repo sink local working-clone dir (default /app/data/backups-git)",
+    )
+    ex.add_argument(
+        "--branch",
+        help="git_repo sink branch (default 'backups')",
+    )
+    ex.add_argument(
+        "--path-template",
+        help=(
+            "git_repo sink in-repo path template — supports {app_slug}, "
+            "{scope}, {tenant_slug}, {kind}, {timestamp}. Default: "
+            "snapshots/{app_slug}/{scope}/{tenant_slug}"
+        ),
+    )
+    ex.add_argument(
+        "--no-lfs",
+        action="store_true",
+        help="git_repo sink: disable git-LFS (stores blobs as plain objects)",
+    )
+    ex.add_argument(
         "--passphrase",
         help="encrypt with GPG — reads from stdin if the value is '-'",
     )
@@ -114,6 +139,11 @@ def _build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--root-dir")
     rs.add_argument("--base-url")
     rs.add_argument("--token")
+    rs.add_argument("--repo-url")
+    rs.add_argument("--clone-dir")
+    rs.add_argument("--branch")
+    rs.add_argument("--path-template")
+    rs.add_argument("--no-lfs", action="store_true")
     rs.add_argument("--locator", required=True, help="sink-specific locator")
     rs.add_argument("--passphrase", help="decrypt with GPG — '-' for stdin")
 
@@ -122,6 +152,11 @@ def _build_parser() -> argparse.ArgumentParser:
     vf.add_argument("--root-dir")
     vf.add_argument("--base-url")
     vf.add_argument("--token")
+    vf.add_argument("--repo-url")
+    vf.add_argument("--clone-dir")
+    vf.add_argument("--branch")
+    vf.add_argument("--path-template")
+    vf.add_argument("--no-lfs", action="store_true")
     vf.add_argument("--locator", required=True)
     vf.add_argument("--expected-sha256", required=True)
 
@@ -148,7 +183,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _sink_choices() -> list[str]:
-    return ["local_disk", "scottydev", "download"]
+    return ["local_disk", "scottydev", "download", "git_repo"]
 
 
 async def _dispatch(ns: argparse.Namespace) -> int:
@@ -397,6 +432,20 @@ def _build_sink(ns: argparse.Namespace) -> StorageSink:
                 "--base-url is required for the orchestrator sink"
             )
         return ScottyDevSink(base_url=ns.base_url, token=token)
+    if ns.sink == "git_repo":
+        from scottycore.services.backup.sinks import GitRepoSink
+
+        if not getattr(ns, "repo_url", None):
+            raise ValueError("--repo-url is required for the git_repo sink")
+        clone_dir = getattr(ns, "clone_dir", None) or "/app/data/backups-git"
+        return GitRepoSink(
+            repo_url=ns.repo_url,
+            local_clone_dir=clone_dir,
+            branch=getattr(ns, "branch", None) or "backups",
+            path_template=getattr(ns, "path_template", None)
+            or "snapshots/{app_slug}/{scope}/{tenant_slug}",
+            lfs_enabled=not getattr(ns, "no_lfs", False),
+        )
     raise ValueError(f"unknown sink: {ns.sink}")
 
 

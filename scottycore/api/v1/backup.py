@@ -149,6 +149,23 @@ def _build_sink(sink_type: str, sink_config: dict) -> StorageSink:
         if not base:
             raise HTTPException(400, "orchestrator sink requires base_url")
         return ScottyDevSink(base_url=base, token=sink_config.get("token"))
+    if sink_type == "git_repo":
+        from scottycore.services.backup.sinks import GitRepoSink
+
+        repo_url = sink_config.get("repo_url")
+        if not repo_url:
+            raise HTTPException(400, "git_repo sink requires repo_url")
+        clone_dir = sink_config.get("clone_dir") or "/app/data/backups-git"
+        return GitRepoSink(
+            repo_url=repo_url,
+            local_clone_dir=clone_dir,
+            branch=sink_config.get("branch") or "backups",
+            path_template=(
+                sink_config.get("path_template")
+                or "snapshots/{app_slug}/{scope}/{tenant_slug}"
+            ),
+            lfs_enabled=bool(sink_config.get("lfs_enabled", True)),
+        )
     raise HTTPException(400, f"unsupported sink_type: {sink_type}")
 
 

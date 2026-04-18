@@ -16,6 +16,7 @@ from scottycore.services.backup.sinks.base import (
     default_filename,
 )
 from scottycore.services.backup.sinks.download import DownloadSink
+from scottycore.services.backup.sinks.git_repo import GitRepoSink
 from scottycore.services.backup.sinks.local_disk import LocalDiskSink
 from scottycore.services.backup.sinks.remote_node import RemoteNodeSink
 from scottycore.services.backup.sinks.scottydev import ScottyDevSink
@@ -23,6 +24,7 @@ from scottycore.services.backup.sinks.scottydev import ScottyDevSink
 __all__ = [
     "BackupBlob",
     "DownloadSink",
+    "GitRepoSink",
     "LocalDiskSink",
     "RemoteNodeSink",
     "ScottyDevSink",
