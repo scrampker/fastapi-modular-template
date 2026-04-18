@@ -6,11 +6,14 @@ on:
   pull_request:
     branches: [master]
 
+env:
+  RUNNER_IMAGE: ${{ vars.BRAND_RUNNER_IMAGE || 'scottycore-runner:latest' }}
+
 jobs:
   build:
     runs-on: [self-hosted, linux]
     container:
-      image: scottycore-runner:latest
+      image: ${{ env.RUNNER_IMAGE }}
     steps:
       - name: checkout
         uses: actions/checkout@v4

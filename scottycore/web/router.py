@@ -8,12 +8,27 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from scottycore.core.brand import get_brand
+
 web_router = APIRouter()
 
 # Resolve templates directory relative to this file so the router works
 # regardless of the working directory the server is started from.
 _TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+
+# Expose the brand as a Jinja global so every template can reference
+# {{ brand.display_name }}, {{ brand.domain_root }}, etc. Consumer apps
+# that reuse scottycore.web.router.templates get this for free; apps that
+# build their own Jinja env should call scottycore.web.setup_jinja_brand().
+_brand = get_brand()
+templates.env.globals["brand"] = _brand
+templates.env.globals["brand_display_name"] = _brand.display_name
+templates.env.globals["orchestrator_display"] = (
+    f"{_brand.display_name}Dev"
+    if _brand.orchestrator_name == f"{_brand.family_name}dev"
+    else _brand.orchestrator_name
+)
 
 
 # ── Service Worker (must be served from root scope, not /static/) ─────────────

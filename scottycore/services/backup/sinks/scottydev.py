@@ -178,7 +178,8 @@ class _Session:
 def _raise_for_status(r: httpx.Response, what: str) -> None:
     if r.status_code >= 400:
         raise SinkError(
-            f"scottydev sink {what} failed: HTTP {r.status_code} {r.text[:400]}"
+            f"orchestrator sink {what} failed: HTTP "
+            f"{r.status_code} {r.text[:400]}"
         )
 
 

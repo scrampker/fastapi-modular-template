@@ -32,14 +32,18 @@ permissions:
   issues: write
 
 env:
-  FORGEJO_BASE: https://forgejo.scotty.consulting
-  SELF_REPO: scotty/scottycore
+  # Brand-configurable — override via forgejo repo/org variables.
+  FORGEJO_BASE: ${{ vars.FORGEJO_BASE || 'https://forgejo.scotty.consulting' }}
+  SELF_REPO: ${{ github.repository }}
+  BOT_NAME: ${{ vars.BRAND_BOT_NAME || 'scottycore-bot' }}
+  BOT_EMAIL: ${{ vars.BRAND_BOT_EMAIL || 'bot@scotty.consulting' }}
+  RUNNER_IMAGE: ${{ vars.BRAND_RUNNER_IMAGE || 'scottycore-runner:latest' }}
 
 jobs:
   extract:
     runs-on: [self-hosted, linux]
     container:
-      image: scottycore-runner:latest
+      image: ${{ env.RUNNER_IMAGE }}
       options: >-
         -v /root/.claude:/root/.claude
         -v /root/.claude.json:/root/.claude.json
@@ -56,8 +60,8 @@ jobs:
 
       - name: configure git
         run: |
-          git config user.name "scottycore-bot"
-          git config user.email "bot@scotty.consulting"
+          git config user.name "$BOT_NAME"
+          git config user.email "$BOT_EMAIL"
           git config --global --add safe.directory "$PWD"
 
       - name: clone source app at the triggering commit

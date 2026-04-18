@@ -92,8 +92,14 @@ def _build_parser() -> argparse.ArgumentParser:
     ex.add_argument(
         "--root-dir", help="local_disk root dir (defaults to /app/data/backups)"
     )
-    ex.add_argument("--base-url", help="scottydev sink base URL")
-    ex.add_argument("--token", help="scottydev sink bearer token (or $SCOTTYDEV_TOKEN)")
+    ex.add_argument(
+        "--base-url",
+        help="orchestrator sink base URL (the ScottyDev-compatible API)",
+    )
+    ex.add_argument(
+        "--token",
+        help="orchestrator sink bearer token (or $SCOTTYDEV_TOKEN)",
+    )
     ex.add_argument(
         "--passphrase",
         help="encrypt with GPG — reads from stdin if the value is '-'",
@@ -387,7 +393,9 @@ def _build_sink(ns: argparse.Namespace) -> StorageSink:
 
         token = ns.token or os.environ.get("SCOTTYDEV_TOKEN")
         if not ns.base_url:
-            raise ValueError("--base-url is required for scottydev sink")
+            raise ValueError(
+                "--base-url is required for the orchestrator sink"
+            )
         return ScottyDevSink(base_url=ns.base_url, token=token)
     raise ValueError(f"unknown sink: {ns.sink}")
 

@@ -7,6 +7,18 @@
   <link rel="manifest" href="/static/manifest.json" />
   <title>{% block title %}{{ app_name }}{% endblock %} — {{ app_name }}</title>
 
+  <!-- Brand globals — expose brand identity to Alpine/HTMX/vanilla JS -->
+  <script>
+    window.__BRAND__ = {
+      framework_name: "{{ brand.framework_name }}",
+      family_name: "{{ brand.family_name }}",
+      orchestrator_name: "{{ brand.orchestrator_name }}",
+      domain_root: "{{ brand.domain_root }}",
+      display_name: "{{ brand.display_name }}",
+    };
+    window.__BRAND_ORCHESTRATOR_DISPLAY__ = "{{ orchestrator_display }}";
+  </script>
+
   <!-- Tailwind CSS via CDN (dev) -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>

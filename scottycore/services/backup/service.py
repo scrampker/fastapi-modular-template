@@ -200,9 +200,13 @@ class BackupService:
         manifest, contributor_data = self._extract_bundle(bundle_bytes)
 
         if manifest.schema_version > SUPPORTED_SCHEMA_VERSION:
+            from scottycore.core.brand import get_brand
+
+            brand = get_brand()
             raise UnsupportedBundleError(
                 f"bundle schema_version={manifest.schema_version} exceeds "
-                f"supported={SUPPORTED_SCHEMA_VERSION}; upgrade scottycore to restore"
+                f"supported={SUPPORTED_SCHEMA_VERSION}; upgrade "
+                f"{brand.framework_name} to restore"
             )
 
         scope = manifest.scope

@@ -5,17 +5,50 @@ Public helpers exposed here:
 - :func:`install_static` — mount scottycore's shipped static assets
   (JS / CSS / icons / manifest) on a consumer app's FastAPI instance,
   with optional consumer-side overlay.
+- :func:`setup_jinja_brand` — inject the current :class:`BrandConfig`
+  as Jinja globals (``brand``, ``brand_display_name``,
+  ``orchestrator_display``) on a consumer-owned Jinja environment so
+  every template can reference ``{{ brand.display_name }}`` etc.
 """
 
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
+    from jinja2 import Environment
 
-__all__ = ["install_static"]
+__all__ = ["install_static", "setup_jinja_brand"]
+
+
+def setup_jinja_brand(env: "Environment") -> None:
+    """Inject the current brand as Jinja globals on *env*.
+
+    Templates rendered by *env* can then reference::
+
+        {{ brand.display_name }}     → "Scotty" (or fork override)
+        {{ brand.framework_name }}   → "scottycore"
+        {{ brand.domain_root }}      → "scotty.consulting"
+        {{ orchestrator_display }}   → "ScottyDev" — convenience label
+
+    Idempotent: calling twice just rewrites the same globals. Use this
+    when a consumer app builds its own ``Environment`` rather than
+    reusing :data:`scottycore.web.router.templates` — that module
+    already injects these globals on its own instance.
+    """
+    from scottycore.core.brand import get_brand
+
+    brand = get_brand()
+    orchestrator_display: str = (
+        f"{brand.display_name}Dev"
+        if brand.orchestrator_name == f"{brand.family_name}dev"
+        else brand.orchestrator_name
+    )
+    env.globals["brand"] = brand
+    env.globals["brand_display_name"] = brand.display_name
+    env.globals["orchestrator_display"] = orchestrator_display
 
 
 def install_static(

@@ -147,7 +147,7 @@ def _build_sink(sink_type: str, sink_config: dict) -> StorageSink:
     if sink_type == "scottydev":
         base = sink_config.get("base_url")
         if not base:
-            raise HTTPException(400, "scottydev sink requires base_url")
+            raise HTTPException(400, "orchestrator sink requires base_url")
         return ScottyDevSink(base_url=base, token=sink_config.get("token"))
     raise HTTPException(400, f"unsupported sink_type: {sink_type}")
 
@@ -445,9 +445,18 @@ async def delete_schedule(
         if row is None:
             raise HTTPException(404, "schedule not found")
         if row.managed_by != "local":
+            from scottycore.core.brand import get_brand
+
+            orchestrator = (
+                f"{get_brand().display_name}Dev"
+                if get_brand().orchestrator_name
+                == f"{get_brand().family_name}dev"
+                else get_brand().orchestrator_name
+            )
             raise HTTPException(
                 409,
-                "schedule is managed by ScottyDev — detach or promote before delete",
+                f"schedule is managed by {orchestrator} — "
+                "detach or promote before delete",
             )
         await s.delete(row)
         await s.commit()

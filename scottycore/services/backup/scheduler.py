@@ -410,7 +410,7 @@ def _build_sink_from_config(sink_type: str, config: dict[str, Any]) -> StorageSi
     if sink_type == "scottydev":
         base = config.get("base_url")
         if not base:
-            raise ValueError("scottydev sink requires base_url")
+            raise ValueError("orchestrator sink requires base_url")
         return ScottyDevSink(base_url=base, token=config.get("token"))
     raise ValueError(f"unsupported sink_type for scheduler: {sink_type}")
 
